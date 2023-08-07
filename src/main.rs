@@ -8,6 +8,8 @@ use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
 
+use crate::pb::schema::{EntriesAdded, EntryAdded};
+
 mod pb;
 mod substreams;
 mod substreams_stream;
@@ -44,7 +46,7 @@ async fn main() -> Result<(), Error> {
         package.modules.clone(),
         module_name.to_string(),
         // Start/stop block are not handled within this project, feel free to play with it
-        0,
+        36472424,
         0,
     );
 
@@ -55,7 +57,7 @@ async fn main() -> Result<(), Error> {
                 break;
             }
             Some(Ok(BlockResponse::New(data))) => {
-                process_block_scoped_data(&data)?;
+                process_block_scoped_data(&data).await?;
                 persist_cursor(data.cursor)?;
             }
             Some(Ok(BlockResponse::Undo(undo_signal))) => {
@@ -74,8 +76,12 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> {
+const IPFS_ENDPOINT: &str = "https://ipfs.network.thegraph.com/api/v0/cat?arg=";
+
+async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> {
     let output = data.output.as_ref().unwrap().map_output.as_ref().unwrap();
+
+    //https://ipfs.network.thegraph.com/api/v0/cat?arg=QmVc8DK39g96uEVMKrVehGzprarzHuFb6SPkDYuSKARJzr
 
     // You can decode the actual Any type received using this code:
     //
@@ -84,13 +90,32 @@ fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> {
     //
     // Where GeneratedStructName is the Rust code generated for the Protobuf representing
     // your type.
-
-    println!(
-        "Block #{} - Payload {} ({} bytes)",
-        data.clock.as_ref().unwrap().number,
-        output.type_url.replace("type.googleapis.com/", ""),
-        output.value.len()
-    );
+    if let Some(output) = &data.output {
+        if let Some(map_output) = &output.map_output {
+            let value = EntriesAdded::decode(map_output.value.as_slice())?;
+            println!(
+                "Block #{} - Found {} entries:",
+                data.clock.as_ref().unwrap().number,
+                value.entries.len(),
+            );
+            for entry in value.entries {
+                let uri = entry.uri;
+                match &uri {
+                    s if s.starts_with("ipfs://") => {
+                        let cid = s.trim_start_matches("ipfs://");
+                        let url = format!("{}{}", IPFS_ENDPOINT, cid);
+                        let data = reqwest::get(&url).await?.text().await?;
+                        println!("  - {}", data);
+                    }
+                    _ => {
+                        println!("Non-ipfs uri: {}", uri);
+                    }
+                }
+            }
+        }
+    } else {
+        return Ok(());
+    }
 
     Ok(())
 }
