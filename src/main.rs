@@ -4,9 +4,12 @@ use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
 
 use prost::Message;
+use std::fs;
 use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
+
+use tokio::task;
 
 use crate::pb::schema::{EntriesAdded, EntryAdded};
 
@@ -20,7 +23,10 @@ async fn main() -> Result<(), Error> {
     if args.len() != 4 {
         println!("usage: stream <endpoint> <spkg> <module>");
         println!();
-        println!("The environment variable SUBSTREAMS_API_TOKEN must be set also");
+        println!(
+            "The en
+vironment variable SUBSTREAMS_API_TOKEN must be set also"
+        );
         println!("and should contain a valid Substream API token.");
         exit(1);
     }
@@ -79,8 +85,6 @@ async fn main() -> Result<(), Error> {
 const IPFS_ENDPOINT: &str = "https://ipfs.network.thegraph.com/api/v0/cat?arg=";
 
 async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> {
-    let output = data.output.as_ref().unwrap().map_output.as_ref().unwrap();
-
     //https://ipfs.network.thegraph.com/api/v0/cat?arg=QmVc8DK39g96uEVMKrVehGzprarzHuFb6SPkDYuSKARJzr
 
     // You can decode the actual Any type received using this code:
@@ -100,12 +104,20 @@ async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> 
             );
             for entry in value.entries {
                 let uri = entry.uri;
-                match &uri {
+                match uri {
                     s if s.starts_with("ipfs://") => {
-                        let cid = s.trim_start_matches("ipfs://");
-                        let url = format!("{}{}", IPFS_ENDPOINT, cid);
-                        let data = reqwest::get(&url).await?.text().await?;
-                        println!("  - {}", data);
+                        println!("Got ipfs data");
+                        let fetch_and_write = async move {
+                            let cid = s.trim_start_matches("ipfs://");
+                            let url = format!("{}{}", IPFS_ENDPOINT, cid);
+
+                            let data = reqwest::get(&url).await.unwrap().text().await.unwrap();
+
+                            let path = format!("./ipfs-data/{}.json", cid);
+                            fs::write(&path, data).unwrap();
+                        };
+
+                        tokio::spawn(fetch_and_write);
                     }
                     _ => {
                         println!("Non-ipfs uri: {}", uri);
