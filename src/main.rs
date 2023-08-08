@@ -4,14 +4,11 @@ use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
 
 use prost::Message;
-use std::fs;
 use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
 
-use tokio::task;
-
-use crate::pb::schema::{EntriesAdded, EntryAdded};
+use crate::pb::schema::EntriesAdded;
 use crate::triples::Action;
 
 mod pb;
@@ -55,8 +52,6 @@ async fn main() -> Result<(), Error> {
         0,
     );
 
-    let mut created_spaces = vec![];
-
     loop {
         match stream.next().await {
             None => {
@@ -64,7 +59,7 @@ async fn main() -> Result<(), Error> {
                 break;
             }
             Some(Ok(BlockResponse::New(data))) => {
-                process_block_scoped_data(&data, &mut created_spaces).await?;
+                process_block_scoped_data(&data).await?;
                 persist_cursor(data.cursor)?;
             }
             Some(Ok(BlockResponse::Undo(undo_signal))) => {
@@ -83,12 +78,7 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-async fn process_block_scoped_data(
-    data: &BlockScopedData,
-    created_spaces: &mut Vec<String>,
-) -> Result<(), Error> {
-    //https://ipfs.network.thegraph.com/api/v0/cat?arg=QmVc8DK39g96uEVMKrVehGzprarzHuFb6SPkDYuSKARJzr
-
+async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> {
     // You can decode the actual Any type received using this code:
     //
     //     use prost::Message;
@@ -114,24 +104,17 @@ async fn process_block_scoped_data(
 
             let entries = join_all(entries_to_fetch).await;
 
-            let spaces_created = entries
+            let sink_actions = entries
                 .iter()
-                .flat_map(|action| action.get_created_spaces())
+                .flat_map(|action| action.get_sink_actions())
                 .collect::<Vec<_>>();
 
-            if spaces_created.len() > 0 {
-                println!("spaces created: {:?}", spaces_created);
+            for sink_action in sink_actions {
+                sink_action
+                    .handle_sink_action()
+                    .expect("Couldn't Handle Sink Action");
             }
-
-            //created_spaces.extend(
-            // entries
-            //     .iter()
-            //     .flat_map(|action| action.get_created_spaces())
-            //     .collect::<Vec<_>>(),
-            //);
         }
-    } else {
-        return Ok(());
     }
 
     Ok(())

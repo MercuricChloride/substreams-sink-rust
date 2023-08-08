@@ -95,7 +95,49 @@ pub enum ValueType {
     Null,
 }
 
+impl ActionTriple {
+    /// This function returns a vector of all the sink actions that should be handled in this action triple.
+    pub fn get_sink_action(&self) -> Option<SinkAction> {
+        let Self {
+            action_triple_type,
+            attribute_id,
+            value,
+            ..
+        } = self;
+        match self.action_triple_type {
+            ActionTripleType::Create => {
+                // if the attribute id is space, and the value is a string, then we have created a space.
+                if let (ValueType::String, "space") = (&value.value_type, attribute_id.as_str()) {
+                    return Some(SinkAction::SpaceCreated {
+                        address: value.value.clone().unwrap(),
+                    });
+                }
+
+                // if the attribute id is type, and the value is a string, then we have created a type.
+                if let (ValueType::String, "type") = (&value.value_type, attribute_id.as_str()) {
+                    return Some(SinkAction::TypeCreated {
+                        name: "placeholder".to_string(), // TODO get the name of the type
+                        attributes: vec![],              // TODO get the attributes of the type
+                        created_in: "placeholder".to_string(), // TODO get the space that the type was created in
+                    });
+                }
+
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
 impl Action {
+    /// This function returns a vector of all the sink actions that should be handled in this action.
+    pub fn get_sink_actions(&self) -> Vec<SinkAction> {
+        self.actions
+            .iter()
+            .filter_map(|action| action.get_sink_action())
+            .collect::<Vec<SinkAction>>()
+    }
+
     /// This function returns a vector of all the spaces that were created in this action.
     /// A space is created when we create an action triple describing a space, and the value is a string that is an address of the space
     pub fn get_created_spaces(&self) -> Vec<String> {
@@ -160,6 +202,43 @@ impl Action {
             }
             _ => panic!("Invalid URI"), //TODO Handle this gracefully
         }
+    }
+}
+
+#[derive(Debug)]
+/// This enum represents different actions that the sink should handle. Actions being specific changes to the graph.
+pub enum SinkAction {
+    /// This action denotes a newly created space. The string is the address of the space.
+    /// We care about this in the sink because when a new space is created, we need to deploy
+    /// a new subgraph for that space.
+    SpaceCreated { address: String },
+    /// This action denotes a newly created type. The string is the name of the type.
+    /// The reason we care about this is because we need to know what attributes to expect so we can
+    /// update the graphQL schema to reflect this new type.
+    TypeCreated {
+        /// The name of the type.
+        name: String,
+        /// The attributes of the type.
+        attributes: Vec<String>,
+        /// The address of the space that this type was created in.
+        created_in: String,
+    },
+}
+
+impl SinkAction {
+    pub fn handle_sink_action(&self) -> Result<(), String> {
+        match &self {
+            SinkAction::SpaceCreated { address } => println!("Space created: {}", address),
+            SinkAction::TypeCreated {
+                name,
+                attributes,
+                created_in,
+            } => println!(
+                "Type created: {} with attributes {:?} in space {}",
+                name, attributes, created_in
+            ),
+        };
+        Ok(())
     }
 }
 
