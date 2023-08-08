@@ -1,5 +1,5 @@
 use anyhow::{format_err, Context, Error};
-use futures03::StreamExt;
+use futures03::{future::join_all, StreamExt};
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
 
@@ -12,10 +12,12 @@ use substreams_stream::{BlockResponse, SubstreamsStream};
 use tokio::task;
 
 use crate::pb::schema::{EntriesAdded, EntryAdded};
+use crate::triples::Action;
 
 mod pb;
 mod substreams;
 mod substreams_stream;
+mod triples;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -23,10 +25,7 @@ async fn main() -> Result<(), Error> {
     if args.len() != 4 {
         println!("usage: stream <endpoint> <spkg> <module>");
         println!();
-        println!(
-            "The en
-vironment variable SUBSTREAMS_API_TOKEN must be set also"
-        );
+        println!("The environment variable SUBSTREAMS_API_TOKEN must be set also");
         println!("and should contain a valid Substream API token.");
         exit(1);
     }
@@ -56,6 +55,8 @@ vironment variable SUBSTREAMS_API_TOKEN must be set also"
         0,
     );
 
+    let mut created_spaces = vec![];
+
     loop {
         match stream.next().await {
             None => {
@@ -63,7 +64,7 @@ vironment variable SUBSTREAMS_API_TOKEN must be set also"
                 break;
             }
             Some(Ok(BlockResponse::New(data))) => {
-                process_block_scoped_data(&data).await?;
+                process_block_scoped_data(&data, &mut created_spaces).await?;
                 persist_cursor(data.cursor)?;
             }
             Some(Ok(BlockResponse::Undo(undo_signal))) => {
@@ -82,9 +83,10 @@ vironment variable SUBSTREAMS_API_TOKEN must be set also"
     Ok(())
 }
 
-const IPFS_ENDPOINT: &str = "https://ipfs.network.thegraph.com/api/v0/cat?arg=";
-
-async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> {
+async fn process_block_scoped_data(
+    data: &BlockScopedData,
+    created_spaces: &mut Vec<String>,
+) -> Result<(), Error> {
     //https://ipfs.network.thegraph.com/api/v0/cat?arg=QmVc8DK39g96uEVMKrVehGzprarzHuFb6SPkDYuSKARJzr
 
     // You can decode the actual Any type received using this code:
@@ -97,33 +99,36 @@ async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> 
     if let Some(output) = &data.output {
         if let Some(map_output) = &output.map_output {
             let value = EntriesAdded::decode(map_output.value.as_slice())?;
-            println!(
-                "Block #{} - Found {} entries:",
-                data.clock.as_ref().unwrap().number,
-                value.entries.len(),
-            );
-            for entry in value.entries {
-                let uri = entry.uri;
-                match uri {
-                    s if s.starts_with("ipfs://") => {
-                        println!("Got ipfs data");
-                        let fetch_and_write = async move {
-                            let cid = s.trim_start_matches("ipfs://");
-                            let url = format!("{}{}", IPFS_ENDPOINT, cid);
 
-                            let data = reqwest::get(&url).await.unwrap().text().await.unwrap();
-
-                            let path = format!("./ipfs-data/{}.json", cid);
-                            fs::write(&path, data).unwrap();
-                        };
-
-                        tokio::spawn(fetch_and_write);
-                    }
-                    _ => {
-                        println!("Non-ipfs uri: {}", uri);
-                    }
-                }
+            if value.entries.len() == 0 {
+                return Ok(());
             }
+            println!("Block #{}:", data.clock.as_ref().unwrap().number);
+            //println!("spaces: {:?}", created_spaces);
+            println!("Fetching {} entries", value.entries.len());
+            let entries_to_fetch: Vec<_> = value
+                .entries
+                .iter()
+                .map(|entry| Action::decode_from_uri(&entry.uri))
+                .collect();
+
+            let entries = join_all(entries_to_fetch).await;
+
+            let spaces_created = entries
+                .iter()
+                .flat_map(|action| action.get_created_spaces())
+                .collect::<Vec<_>>();
+
+            if spaces_created.len() > 0 {
+                println!("spaces created: {:?}", spaces_created);
+            }
+
+            //created_spaces.extend(
+            // entries
+            //     .iter()
+            //     .flat_map(|action| action.get_created_spaces())
+            //     .collect::<Vec<_>>(),
+            //);
         }
     } else {
         return Ok(());
