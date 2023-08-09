@@ -23,6 +23,8 @@
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 
+use crate::persist::Persist;
+
 pub const IPFS_ENDPOINT: &str = "https://ipfs.network.thegraph.com/api/v0/cat?arg=";
 
 // An action is a collection of action triples, this is used to represent a change to the graph.
@@ -228,7 +230,11 @@ pub enum SinkAction {
 impl SinkAction {
     pub fn handle_sink_action(&self) -> Result<(), String> {
         match &self {
-            SinkAction::SpaceCreated { address } => println!("Space created: {}", address),
+            SinkAction::SpaceCreated { address } => {
+                let mut persist = Persist::open();
+                persist.push_space(address.to_string());
+                println!("Spaces: {:?}", persist.spaces);
+            }
             SinkAction::TypeCreated {
                 name,
                 attributes,

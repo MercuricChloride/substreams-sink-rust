@@ -3,6 +3,7 @@ use futures03::{future::join_all, StreamExt};
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
 
+use persist::Persist;
 use prost::Message;
 use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
@@ -12,6 +13,7 @@ use crate::pb::schema::EntriesAdded;
 use crate::triples::Action;
 
 mod pb;
+mod persist;
 mod substreams;
 mod substreams_stream;
 mod triples;
@@ -94,8 +96,6 @@ async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> 
                 return Ok(());
             }
             println!("Block #{}:", data.clock.as_ref().unwrap().number);
-            //println!("spaces: {:?}", created_spaces);
-            println!("Fetching {} entries", value.entries.len());
             let entries_to_fetch: Vec<_> = value
                 .entries
                 .iter()
@@ -131,14 +131,14 @@ fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyho
 }
 
 fn persist_cursor(_cursor: String) -> Result<(), anyhow::Error> {
-    // FIXME: Handling of the cursor is missing here. It should be saved each time
-    // a full block has been correctly processed/persisted. The saving location
-    // is your responsibility.
-    //
-    // By making it persistent, we ensure that if we crash, on startup we are
-    // going to read it back from database and start back our SubstreamsStream
-    // with it ensuring we are continuously streaming without ever losing a single
-    // element.
+    let mut persist: Persist = Persist::open();
+
+    persist.cursor = Some(_cursor);
+
+    let file = std::fs::File::create("persist.json")?;
+
+    serde_json::to_writer(file, &persist)?;
+
     Ok(())
 }
 
@@ -146,6 +146,9 @@ fn load_persisted_cursor() -> Result<Option<String>, anyhow::Error> {
     // FIXME: Handling of the cursor is missing here. It should be loaded from
     // somewhere (local file, database, cloud storage) and then `SubstreamStream` will
     // be able correctly resume from the right block.
+    if let Some(cursor) = &Persist::open().cursor {
+        return Ok(Some(cursor.clone()));
+    }
     Ok(None)
 }
 

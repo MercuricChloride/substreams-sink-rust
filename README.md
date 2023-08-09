@@ -1,3 +1,17 @@
+# Yaniv Notes
+Test Cases:
+- Create first space
+- Entity creation for that space
+- Modification of those triples
+- Create second space
+- Add second space as a subspace of the first space
+- Create a third space
+- Adding a third space as a subspace of the second space
+- Changing a type for the third space (Should redeploy the subgraph with correct types && bubble up to the parent spaces)
+- Removing the second space as a subspace of the first space (The first space shouldn't have any of the types created in the second or third space)
+- Prototype the subgraph deployments in a custom sink
+- Add counts to entities
+
 ## Substreams Sink Rust
 
 This repository show cases a functional base Rust project that consumes a Substreams `.spkg` (local file only).
