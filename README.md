@@ -1,3 +1,13 @@
+# IMPORTANT
+
+AFTER CLONING THIS REPO, YOU MUST PULL IN THE SUBMODULES
+
+Use this command to do so:
+
+`git submodule update --init --recursive`
+
+Failure to do so will mean you won't have the subgraph cloned and the sink will not work 
+
 # Yaniv Notes
 Test Cases:
 - Create first space
