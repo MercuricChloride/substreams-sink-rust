@@ -51,42 +51,58 @@ impl Persist {
         } else {
             self.spaces = Some(vec![space]);
         }
-        self.save();
     }
 
-    pub fn add_type(&mut self, type_name: &String, fields: Option<Vec<Field>>) {
+    pub fn add_type(&mut self, entity_id: &String, space: &String) {
         if let Some(types) = &mut self.types {
             types.insert(
-                type_name.clone(),
+                entity_id.clone(),
                 Type {
-                    name: type_name.clone(),
-                    fields: fields.unwrap_or_default(),
+                    entity_id: entity_id.clone(),
+                    space: space.clone(),
+                    fields: vec![],
                 },
             );
         } else {
             let mut types = HashMap::new();
             types.insert(
-                type_name.clone(),
+                entity_id.clone(),
                 Type {
-                    name: type_name.clone(),
-                    fields: fields.unwrap_or_default(),
+                    entity_id: entity_id.clone(),
+                    space: space.clone(),
+                    fields: vec![],
                 },
             );
             self.types = Some(types);
         }
-        self.save();
+    }
+
+    /// entity_id is the id of the entity that the attribute was added to
+    pub fn add_attribute(&mut self, entity_id: &String, attribute_id: &String, space: &String) {
+        if let Some(types) = &mut self.types {
+            if let Some(type_) = types.get_mut(entity_id) {
+                type_.fields.push(attribute_id.clone());
+            } else {
+                self.add_type(entity_id, space);
+                self.add_attribute(entity_id, attribute_id, space);
+            }
+        } else {
+            panic!("Tried to add an attribute before types was initialized in the persist");
+        }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Type {
-    pub name: String,
-    pub fields: Vec<Field>,
+    /// The Id of the type
+    pub entity_id: String,
+    /// The space that this type was created in
+    pub space: String,
+    /// An array of entity ids that are fields of this type
+    pub fields: Vec<String>,
 }
 
-// TODO Make this an enum
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Field {
-    pub name: String,
-    pub type_name: String,
+    pub entity_id: String,
 }

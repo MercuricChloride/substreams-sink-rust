@@ -12,8 +12,10 @@ use substreams_stream::{BlockResponse, SubstreamsStream};
 use crate::pb::schema::EntriesAdded;
 use crate::triples::Action;
 
+pub mod constants;
 mod pb;
 mod persist;
+mod sink_actions;
 mod substreams;
 mod substreams_stream;
 mod triples;
@@ -35,6 +37,7 @@ async fn main() -> Result<(), Error> {
 
     let token_env = env::var("SUBSTREAMS_API_TOKEN").unwrap_or("".to_string());
     let mut token: Option<String> = None;
+
     if token_env.len() > 0 {
         token = Some(token_env);
     }
@@ -93,28 +96,40 @@ async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> 
             let value = EntriesAdded::decode(map_output.value.as_slice())?;
 
             if value.entries.len() == 0 {
+                println!("Empty Block #{}:", data.clock.as_ref().unwrap().number);
                 return Ok(());
             }
-            println!("Block #{}:", data.clock.as_ref().unwrap().number);
+
+            println!(
+                "Block with some data #{}:",
+                data.clock.as_ref().unwrap().number
+            );
+
             let entries_to_fetch: Vec<_> = value
                 .entries
                 .iter()
-                .map(|entry| Action::decode_from_uri(&entry.uri))
+                .map(Action::decode_from_entry)
                 .collect();
 
             let entries = join_all(entries_to_fetch).await;
 
             let sink_actions = entries
                 .iter()
-                .flat_map(|action| action.get_sink_actions())
+                .filter_map(|action| action.get_sink_actions())
+                .flatten()
                 .collect::<Vec<_>>();
+
+            let mut persist: Persist = Persist::open();
 
             for sink_action in sink_actions {
                 sink_action
-                    .handle_sink_action()
+                    .handle_sink_action(&mut persist)
                     .expect("Couldn't Handle Sink Action");
             }
+
+            persist.save();
         }
+    } else {
     }
 
     Ok(())
@@ -143,9 +158,6 @@ fn persist_cursor(_cursor: String) -> Result<(), anyhow::Error> {
 }
 
 fn load_persisted_cursor() -> Result<Option<String>, anyhow::Error> {
-    // FIXME: Handling of the cursor is missing here. It should be loaded from
-    // somewhere (local file, database, cloud storage) and then `SubstreamStream` will
-    // be able correctly resume from the right block.
     if let Some(cursor) = &Persist::open().cursor {
         return Ok(Some(cursor.clone()));
     }
