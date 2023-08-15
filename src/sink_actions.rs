@@ -1,3 +1,5 @@
+use std::process;
+
 use crate::persist::Persist;
 
 // TODO Add AttributeAdded
@@ -43,10 +45,15 @@ pub enum SinkAction {
 impl SinkAction {
     pub fn handle_sink_action(&self, persist: &mut Persist) -> Result<(), String> {
         match &self {
-            // TODO Actually deploy a subgraph here
             SinkAction::SpaceCreated { space } => {
+                // push the space to the persist
                 persist.push_space(space.to_string());
-                println!("Space added: {:?}", space);
+                let command = format!(
+                    "(cd external/subgraph && ./deploy.sh mercuricchloride/geo-test {})",
+                    space
+                );
+                println!("Deploying subgraph for space: {}", space);
+                process::Command::new(command);
             }
 
             SinkAction::TypeCreated { entity_id, space } => {
