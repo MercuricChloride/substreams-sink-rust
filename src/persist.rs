@@ -1,6 +1,9 @@
 use std::{collections::HashMap, fs::File};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+
+use crate::triples::ValueType;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Persist {
@@ -10,6 +13,12 @@ pub struct Persist {
     pub types: Option<HashMap<String, Type>>,
     /// An array of spaces created
     pub spaces: Option<Vec<String>>,
+    /// A map from attribute id -> attribute
+    pub attributes: Option<HashMap<String, Attribute>>,
+    /// A map from entity id -> name
+    pub names: Option<HashMap<String, String>>,
+    /// A map from entity id -> value type
+    pub value_types: Option<HashMap<String, ValueType>>,
 }
 
 impl Persist {
@@ -60,7 +69,7 @@ impl Persist {
                 Type {
                     entity_id: entity_id.clone(),
                     space: space.clone(),
-                    fields: vec![],
+                    attributes: vec![],
                 },
             );
         } else {
@@ -70,7 +79,7 @@ impl Persist {
                 Type {
                     entity_id: entity_id.clone(),
                     space: space.clone(),
-                    fields: vec![],
+                    attributes: vec![],
                 },
             );
             self.types = Some(types);
@@ -81,13 +90,33 @@ impl Persist {
     pub fn add_attribute(&mut self, entity_id: &String, attribute_id: &String, space: &String) {
         if let Some(types) = &mut self.types {
             if let Some(type_) = types.get_mut(entity_id) {
-                type_.fields.push(attribute_id.clone());
+                type_.attributes.push(attribute_id.clone());
             } else {
                 self.add_type(entity_id, space);
                 self.add_attribute(entity_id, attribute_id, space);
             }
         } else {
             panic!("Tried to add an attribute before types was initialized in the persist");
+        }
+    }
+
+    pub fn add_name(&mut self, entity_id: &String, name: &String) {
+        if let Some(names) = &mut self.names {
+            names.insert(entity_id.clone(), name.clone());
+        } else {
+            let mut names = HashMap::new();
+            names.insert(entity_id.clone(), name.clone());
+            self.names = Some(names);
+        }
+    }
+
+    pub fn add_value_type(&mut self, entity_id: &String, value_type: ValueType) {
+        if let Some(value_types) = &mut self.value_types {
+            value_types.insert(entity_id.clone(), value_type);
+        } else {
+            let mut value_types = HashMap::new();
+            value_types.insert(entity_id.clone(), value_type);
+            self.value_types = Some(value_types);
         }
     }
 }
@@ -98,11 +127,13 @@ pub struct Type {
     pub entity_id: String,
     /// The space that this type was created in
     pub space: String,
-    /// An array of entity ids that are fields of this type
-    pub fields: Vec<String>,
+    /// An array of Attributes that are attributes of this type
+    pub attributes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Field {
+pub struct Attribute {
     pub entity_id: String,
+    pub name: String,
+    pub value: ValueType,
 }

@@ -8,6 +8,8 @@ pub enum Attributes {
     Type,
     Attribute,
     Space,
+    Name,
+    ValueType,
 }
 
 impl Attributes {
@@ -17,6 +19,18 @@ impl Attributes {
             Attributes::Type => "type",
             Attributes::Attribute => "01412f83-8189-4ab1-8365-65c7fd358cc1",
             Attributes::Space => "space",
+            Attributes::Name => "name",
+            Attributes::ValueType => "ee26ef23-f7f1-4eb6-b742-3b0fa38c1fd8",
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Attributes::Type => "Type",
+            Attributes::Attribute => "Attribute",
+            Attributes::Space => "Space",
+            Attributes::Name => "Name",
+            Attributes::ValueType => "ValueType",
         }
     }
 }

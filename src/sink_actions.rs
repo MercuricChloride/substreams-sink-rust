@@ -1,6 +1,6 @@
 use std::process;
 
-use crate::persist::Persist;
+use crate::{persist::Persist, triples::ValueType};
 
 // TODO Add AttributeAdded
 #[derive(Debug)]
@@ -40,6 +40,20 @@ pub enum SinkAction {
         /// The ID of the attribute entity
         attribute_id: String,
     },
+
+    /// We care about a name being added to an entity because we need this when adding attributes to a type in the graph.
+    NameAdded {
+        space: String,
+        entity_id: String,
+        name: String,
+    },
+
+    /// We care about a ValueType being added to an entity because we need this when adding attributes to a type in the graph.
+    ValueTypeAdded {
+        space: String,
+        entity_id: String,
+        value_type: ValueType,
+    },
 }
 
 impl SinkAction {
@@ -71,6 +85,27 @@ impl SinkAction {
                     "Attribute added: {:?} in space {:?} on entity {:?}",
                     attribute_id, space, entity_id
                 );
+            }
+
+            SinkAction::NameAdded {
+                space,
+                entity_id,
+                name,
+            } => {
+                println!("Name added on entity {:?} in space {:?}", entity_id, space);
+                persist.add_name(entity_id, name);
+            }
+
+            SinkAction::ValueTypeAdded {
+                space,
+                entity_id,
+                value_type,
+            } => {
+                println!(
+                    "ValueType added on entity {:?} in space {:?}",
+                    entity_id, space
+                );
+                persist.add_value_type(entity_id, value_type.clone());
             }
         };
         Ok(())

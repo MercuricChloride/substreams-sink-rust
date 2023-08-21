@@ -21,7 +21,8 @@
 //! `(Me, YearsOld, 22)`
 
 use base64::{engine::general_purpose, Engine as _};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::{constants::Attributes, pb::schema::EntryAdded, sink_actions::SinkAction};
 
@@ -36,7 +37,6 @@ pub struct Action {
     /// ???
     pub version: String,
     /// The collection of action triples that make up this action.
-    #[deprecated(note = "This is deprecated, use the `actions()` method instead!")]
     pub actions: Vec<ActionTriple>,
     /// the space that this action was emitted from
     #[serde(skip)]
@@ -44,10 +44,29 @@ pub struct Action {
 }
 
 impl Action {
+    fn decode_with_space(json: &[u8], updated_space: &str) -> Self {
+        let mut action: Action = serde_json::from_slice(json).unwrap();
+        for action_triple in action.actions.iter_mut() {
+            match action_triple {
+                ActionTriple::CreateEntity { space, .. } => {
+                    *space = updated_space.to_string();
+                }
+                ActionTriple::CreateTriple { space, .. } => {
+                    *space = updated_space.to_string();
+                }
+                ActionTriple::DeleteTriple { space, .. } => {
+                    *space = updated_space.to_string();
+                }
+            }
+        }
+        action.space = updated_space.to_string();
+        action
+    }
+
     /// This function returns a vector of all the sink actions that should be handled in this action.
     pub fn get_sink_actions(&self) -> Option<Vec<SinkAction>> {
         let sink_actions = self
-            .actions()
+            .actions
             .iter()
             .filter_map(|action| action.get_sink_action())
             .collect::<Vec<SinkAction>>();
@@ -59,31 +78,14 @@ impl Action {
         }
     }
 
-    /// This is a helper function that returns a vector of all the action triples in this action.
-    /// The actions field is deprecated because it will not contain the space that the triple was emitted from.
-    /// NOTE This might not be the most performant way to do this, but it works for now.
-    pub fn actions(&self) -> Vec<ActionTriple> {
-        #[allow(deprecated)]
-        self.actions
-            .clone()
-            .iter()
-            .map(|action| ActionTriple {
-                space: self.space.clone(),
-                ..action.clone()
-            })
-            .collect()
-    }
-
-    // TODO Maybe impliment this as a From trait?
     pub async fn decode_from_entry(entry: &EntryAdded) -> Self {
         let uri = &entry.uri;
         match uri {
             uri if uri.starts_with("data:application/json;base64,") => {
                 let data = uri.split("base64,").last().unwrap();
                 let decoded = general_purpose::URL_SAFE.decode(data.as_bytes()).unwrap();
-                let mut action: Action = serde_json::from_slice(&decoded).unwrap();
-                action.space = entry.space.clone();
-                action
+                let space = entry.space.clone();
+                Action::decode_with_space(&decoded, &space)
             }
             uri if uri.starts_with("ipfs://") => {
                 let cid = uri.trim_start_matches("ipfs://");
@@ -106,27 +108,78 @@ impl Action {
                         }
                     }
                 }
-                let mut action: Action = serde_json::from_str(&data)
-                    .unwrap_or_else(|_| panic!("Failed to decode action from IPFS: {}", data));
-                action.space = entry.space.clone();
-                action
+                let space = entry.space.clone();
+                Action::decode_with_space(&data.as_bytes(), &space)
             }
             _ => panic!("Invalid URI"), //TODO Handle this gracefully
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+// #[derive(Serialize, Deserialize, Debug, Clone)]
+// #[serde(rename_all = "camelCase")]
+// pub struct ActionTriple {
+//     #[serde(rename = "type")]
+//     pub action_triple_type: ActionTripleType,
+//     pub entity_id: String,
+//     pub attribute_id: String,
+//     pub value: ValueType,
+//     // this is not part of the triple, but it is used to store the space that the triple is in.
+//     #[serde(skip)]
+//     pub space: String,
+// }
+
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct ActionTriple {
-    #[serde(rename = "type")]
-    pub action_triple_type: ActionTripleType,
-    pub entity_id: String,
-    pub attribute_id: String,
-    pub value: ActionTripleValue,
-    // this is not part of the triple, but it is used to store the space that the triple is in.
-    #[serde(skip)]
-    pub space: String,
+pub enum ActionTriple {
+    CreateEntity {
+        entity_id: String,
+        #[serde(skip)]
+        space: String,
+    },
+    CreateTriple {
+        entity_id: String,
+        attribute_id: String,
+        value: ValueType,
+        #[serde(skip)]
+        space: String,
+    },
+    DeleteTriple {
+        entity_id: String,
+        attribute_id: String,
+        value: ValueType,
+        #[serde(skip)]
+        space: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for ActionTriple {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let val = Value::deserialize(deserializer)?;
+
+        match val.get("type").and_then(Value::as_str) {
+            Some("createEntity") => Ok(ActionTriple::CreateEntity {
+                entity_id: val["entityId"].as_str().unwrap().to_string(),
+                space: "".to_string(),
+            }),
+            Some("createTriple") => Ok(ActionTriple::CreateTriple {
+                entity_id: val["entityId"].as_str().unwrap().to_string(),
+                attribute_id: val["attributeId"].as_str().unwrap().to_string(),
+                value: serde_json::from_value(val["value"].clone()).unwrap(),
+                space: "".to_string(),
+            }),
+            Some("deleteTriple") => Ok(ActionTriple::DeleteTriple {
+                entity_id: val["entityId"].as_str().unwrap().to_string(),
+                attribute_id: val["attributeId"].as_str().unwrap().to_string(),
+                value: serde_json::from_value(val["value"].clone()).unwrap(),
+                space: "".to_string(),
+            }),
+            _ => Err(serde::de::Error::custom("Unknown type")),
+        }
+    }
 }
 
 impl ActionTriple {
@@ -137,6 +190,8 @@ impl ActionTriple {
             self.get_type_created(),
             self.get_space_created(),
             self.get_attribute_added(),
+            self.get_name_added(),
+            self.get_value_type_added(),
         ];
 
         // return the action if any
@@ -144,75 +199,103 @@ impl ActionTriple {
     }
 
     fn get_type_created(&self) -> Option<SinkAction> {
-        let Self {
-            action_triple_type,
-            attribute_id,
-            entity_id,
-            space,
-            ..
-        } = self;
-        match (action_triple_type, attribute_id.as_str()) {
-            (&ActionTripleType::Create, attribute_id)
-                if attribute_id.starts_with(Attributes::Type.id()) =>
-            {
-                Some(SinkAction::TypeCreated {
-                    entity_id: entity_id.to_string(),
-                    space: space.to_string(),
-                })
-            }
+        match self {
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+            } if attribute_id.starts_with(Attributes::Type.id()) => Some(SinkAction::TypeCreated {
+                entity_id: entity_id.to_string(),
+                space: space.to_string(),
+            }),
             _ => None,
         }
     }
 
     fn get_space_created(&self) -> Option<SinkAction> {
-        let Self {
-            action_triple_type,
-            attribute_id,
-            value,
-            ..
-        } = self;
-        match (action_triple_type, attribute_id.as_str(), &value.value_type) {
-            (ActionTripleType::Create, attribute_id, ValueType::String)
-                if attribute_id.starts_with(Attributes::Space.id()) =>
-            {
+        match self {
+            ActionTriple::CreateTriple {
+                attribute_id,
+                value,
+                ..
+            } if attribute_id.starts_with(Attributes::Space.id()) => {
                 // if the attribute id is space, and the value is a string, then we have created a space.
-                Some(SinkAction::SpaceCreated {
-                    space: value.value.clone().unwrap(),
-                })
+                if let ValueType::String { id: _, value } = value {
+                    Some(SinkAction::SpaceCreated {
+                        space: value.clone(),
+                    })
+                } else {
+                    None
+                }
             }
             _ => None,
         }
     }
 
     fn get_attribute_added(&self) -> Option<SinkAction> {
-        let Self {
-            action_triple_type,
-            attribute_id,
-            entity_id,
-            ..
-        } = self;
-        match (action_triple_type, attribute_id.as_str()) {
-            (ActionTripleType::Create, attribute_id)
-                if attribute_id.starts_with(Attributes::Attribute.id()) =>
-            {
+        match self {
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+            } if attribute_id.starts_with(Attributes::Attribute.id()) => {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
-                Some(SinkAction::AttributeAdded {
-                    space: self.space.clone(),
-                    entity_id: entity_id.to_string(),
-                    attribute_id: attribute_id.to_string(),
+                if let ValueType::Entity { id } = value {
+                    return Some(SinkAction::AttributeAdded {
+                        space: space.clone(),
+                        entity_id: entity_id.clone(),
+                        attribute_id: id.clone(),
+                    });
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn get_name_added(&self) -> Option<SinkAction> {
+        match self {
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+            } if attribute_id.starts_with(Attributes::Name.id()) => {
+                // if the attribute id is attribute, then we have added an attribute to an entity.
+                if let ValueType::String { value, .. } = value {
+                    return Some(SinkAction::NameAdded {
+                        space: space.clone(),
+                        entity_id: entity_id.clone(),
+                        name: value.clone(),
+                    });
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn get_value_type_added(&self) -> Option<SinkAction> {
+        match self {
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+            } if attribute_id.starts_with(Attributes::ValueType.id()) => {
+                Some(SinkAction::ValueTypeAdded {
+                    space: space.clone(),
+                    entity_id: entity_id.clone(),
+                    value_type: value.clone(),
                 })
             }
             _ => None,
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ActionTripleValue {
-    #[serde(rename = "type")]
-    pub value_type: ValueType,
-    pub value: Option<String>,
-    pub id: String,
 }
 
 /// In geo we have a concept of actions, which represent changes to make in the graph.
@@ -246,13 +329,82 @@ pub struct Triple {
 }
 
 /// This represents the value type of a triple. IE The final part of a triple. (Entity, Attribute, _Value_)
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum ValueType {
-    String,
-    Number,
-    Entity,
-    Null,
+    /// The number value
+    Number {
+        /// The uuid of this specific number
+        id: String,
+        /// The value of the number
+        value: f64,
+    },
+    /// The string value
+    String {
+        /// The uuid of this specific string
+        id: String,
+        /// The value of the string
+        value: String,
+    },
+    /// The url of the image I think?
+    Image {
+        /// The uuid of this specific image
+        id: String,
+        /// The link to the image
+        value: String,
+    },
+    Entity {
+        /// The id of the entity
+        id: String,
+    },
+    Date {
+        /// The id of the date
+        id: String,
+        /// The date string ISO 8601
+        value: String,
+    },
+    Url {
+        /// The id of the url
+        id: String,
+        /// The url string
+        value: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for ValueType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let val = Value::deserialize(deserializer)?;
+
+        match val.get("type").and_then(Value::as_str) {
+            Some("number") => Ok(ValueType::Number {
+                id: val["id"].as_str().unwrap().to_string(),
+                value: val["value"].as_f64().unwrap(),
+            }),
+            Some("string") => Ok(ValueType::String {
+                id: val["id"].as_str().unwrap().to_string(),
+                value: val["value"].as_str().unwrap().to_string(),
+            }),
+            Some("image") => Ok(ValueType::Image {
+                id: val["id"].as_str().unwrap().to_string(),
+                value: val["value"].as_str().unwrap().to_string(),
+            }),
+            Some("entity") => Ok(ValueType::Entity {
+                id: val["id"].as_str().unwrap().to_string(),
+            }),
+            Some("date") => Ok(ValueType::Date {
+                id: val["id"].as_str().unwrap().to_string(),
+                value: val["value"].as_str().unwrap().to_string(),
+            }),
+            Some("url") => Ok(ValueType::Url {
+                id: val["id"].as_str().unwrap().to_string(),
+                value: val["value"].as_str().unwrap().to_string(),
+            }),
+            _ => Err(serde::de::Error::custom("Unknown type")),
+        }
+    }
 }
 
 impl TryInto<SinkAction> for ActionTriple {
