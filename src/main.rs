@@ -5,6 +5,7 @@ use pb::sf::substreams::v1::Package;
 
 use persist::Persist;
 use prost::Message;
+use std::io::Write;
 use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
@@ -146,20 +147,15 @@ fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyho
 }
 
 fn persist_cursor(_cursor: String) -> Result<(), anyhow::Error> {
-    let mut persist: Persist = Persist::open();
-
-    persist.cursor = Some(_cursor);
-
-    let file = std::fs::File::create("persist.json")?;
-
-    serde_json::to_writer(file, &persist)?;
+    let mut file = std::fs::File::create("cursor.txt")?;
+    file.write_all(_cursor.as_bytes())?;
 
     Ok(())
 }
 
 fn load_persisted_cursor() -> Result<Option<String>, anyhow::Error> {
-    if let Some(cursor) = &Persist::open().cursor {
-        return Ok(Some(cursor.clone()));
+    if let Ok(cursor) = std::fs::read_to_string("cursor.txt") {
+        return Ok(Some(cursor));
     }
     Ok(None)
 }

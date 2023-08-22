@@ -8,7 +8,7 @@ use crate::triples::ValueType;
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Persist {
     /// The cursor to start from
-    pub cursor: Option<String>,
+    //pub cursor: Option<String>,
     /// A map from entity id -> fields
     pub types: Option<HashMap<String, Type>>,
     /// An array of spaces created
