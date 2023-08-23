@@ -130,7 +130,6 @@ async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> 
 
             persist.save();
         }
-    } else {
     }
 
     Ok(())

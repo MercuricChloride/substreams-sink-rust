@@ -116,19 +116,8 @@ impl Action {
     }
 }
 
-// #[derive(Serialize, Deserialize, Debug, Clone)]
-// #[serde(rename_all = "camelCase")]
-// pub struct ActionTriple {
-//     #[serde(rename = "type")]
-//     pub action_triple_type: ActionTripleType,
-//     pub entity_id: String,
-//     pub attribute_id: String,
-//     pub value: ValueType,
-//     // this is not part of the triple, but it is used to store the space that the triple is in.
-//     #[serde(skip)]
-//     pub space: String,
-// }
-
+/// In geo we have a concept of actions, which represent changes to make in the graph.
+/// This enum represents the different types of actions that can be taken.
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum ActionTriple {
@@ -203,7 +192,7 @@ impl ActionTriple {
             ActionTriple::CreateTriple {
                 entity_id,
                 attribute_id,
-                value,
+                value: _,
                 space,
             } if attribute_id.starts_with(Attributes::Type.id()) => Some(SinkAction::TypeCreated {
                 entity_id: entity_id.to_string(),
@@ -247,6 +236,7 @@ impl ActionTriple {
                         space: space.clone(),
                         entity_id: entity_id.clone(),
                         attribute_id: id.clone(),
+                        value: value.clone(),
                     });
                 } else {
                     None
@@ -290,42 +280,13 @@ impl ActionTriple {
                 Some(SinkAction::ValueTypeAdded {
                     space: space.clone(),
                     entity_id: entity_id.clone(),
+                    attribute_id: attribute_id.clone(),
                     value_type: value.clone(),
                 })
             }
             _ => None,
         }
     }
-}
-
-/// In geo we have a concept of actions, which represent changes to make in the graph.
-/// This enum represents the different types of actions that can be taken.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum ActionTripleType {
-    /// This is used to create a new entity.
-    #[serde(rename = "createTriple")]
-    Create,
-    /// This is used to update an existing triple.
-    #[serde(rename = "updateTriple")]
-    Update,
-    /// This is used to delete an existing entity.
-    #[serde(rename = "deleteTriple")]
-    Delete,
-}
-
-/// An Entity in geo is a node in the graph that has a unique identifier.
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Entity(pub String);
-
-/// This represents a triple in the graph. (Entity, Attribute, Value)
-/// Where the Entity is the node that the triple is connected to.
-/// The Attribute is the type of relationship that the triple represents. (Which is also an entity / node in the graph)
-/// And the Value is the value of the triple. (Either an entity or a primitive value)
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Triple {
-    pub entity: Entity,
-    pub attribute: Entity,
-    pub value: ValueType,
 }
 
 /// This represents the value type of a triple. IE The final part of a triple. (Entity, Attribute, _Value_)
@@ -416,37 +377,155 @@ impl TryInto<SinkAction> for ActionTriple {
     }
 }
 
-//pub fn handle_action_triple(action_triple: ActionTripleType) {}
-// TODO I need to add the space to the Action
 #[cfg(test)]
 mod tests {
+    use crate::persist::Persist;
+
     use super::*;
-    use std::fs;
 
-    const DATA: &'static str = "data:application/json;base64,eyJ0eXBlIjoicm9vdCIsInZlcnNpb24iOiIwLjAuMSIsImFjdGlvbnMiOlt7InR5cGUiOiJjcmVhdGVUcmlwbGUiLCJlbnRpdHlJZCI6IjgyYWU1ZTJiLWUwN2QtNDQ2MS1hODhiLTExNTg5MzFlNjliOCIsImF0dHJpYnV0ZUlkIjoibmFtZSIsInZhbHVlIjp7InR5cGUiOiJzdHJpbmciLCJ2YWx1ZSI6IkhlYWx0aCIsImlkIjoiYzYzODNiNTctMGRhYy00Mjg4LTliMDYtYWE2OWZmYTRkNjJlIn19LHsidHlwZSI6ImNyZWF0ZVRyaXBsZSIsImVudGl0eUlkIjoiODJhZTVlMmItZTA3ZC00NDYxLWE4OGItMTE1ODkzMWU2OWI4IiwiYXR0cmlidXRlSWQiOiJzcGFjZSIsInZhbHVlIjp7InR5cGUiOiJzdHJpbmciLCJ2YWx1ZSI6IjB4ZTNkMDg3NjM0OThlMzI0N0VDMDBBNDgxRjE5OUIwMThmMjE0ODcyMyIsImlkIjoiNjA4OWM3MzctMzJhOC00YzUxLWI4MjgtNjk0OWI5MjE2OWI0In19LHsidHlwZSI6ImNyZWF0ZVRyaXBsZSIsImVudGl0eUlkIjoiM2FkNGRmMjctMTMyZi00ZWY2LTg3ZjgtMDcwZjA2M2IwNzRjIiwiYXR0cmlidXRlSWQiOiJuYW1lIiwidmFsdWUiOnsidHlwZSI6InN0cmluZyIsInZhbHVlIjoiU2FuIEZyYW5jaXNjbyIsImlkIjoiMmUxZmY2ZDctYjU4Zi00ZDFmLTk0OWMtMTJlOTViMzM3YWY3In19LHsidHlwZSI6ImNyZWF0ZVRyaXBsZSIsImVudGl0eUlkIjoiM2FkNGRmMjctMTMyZi00ZWY2LTg3ZjgtMDcwZjA2M2IwNzRjIiwiYXR0cmlidXRlSWQiOiJzcGFjZSIsInZhbHVlIjp7InR5cGUiOiJzdHJpbmciLCJ2YWx1ZSI6IjB4YzQ2NjE4QzIwMGYwMkVGMUVFQTI4OTIzRkMzODI4MzAxZTYzQzRCZCIsImlkIjoiYTExYmQxN2YtZjNkZC00NjQxLWE2Y2ItNjhmMDkwOThkZGU3In19XX0=";
+    const DEFAULT_SPACE: &'static str = "0xSpaceAddress";
 
-    #[test]
-    fn can_serialize_mock_data() {
-        let mock_data = fs::read_to_string("./mock-data.json").unwrap();
-        let action: Action = serde_json::from_str(&mock_data).unwrap();
-        println!("{:?}", action);
+    /// This function will bootstrap the persist with a type, give it a name
+    /// This is used for testing
+    /// It's id is "basic-type"
+    /// It's name is "Basic Type"
+    fn bootstrap_persist(persist: &mut Persist) {
+        // a triple that marks the basic-type as a "type"
+        let simple_type = ActionTriple::CreateTriple {
+            entity_id: "basic-type".to_string(),
+            attribute_id: Attributes::Type.id().to_string(),
+            value: ValueType::Entity {
+                id: "type-uuid".to_string(),
+            },
+            space: DEFAULT_SPACE.to_string(),
+        };
+
+        assert!(matches!(
+            simple_type.get_sink_action(),
+            Some(SinkAction::TypeCreated { .. })
+        ));
+
+        // a triple that gives a name to the basic type
+        let simple_name = ActionTriple::CreateTriple {
+            entity_id: "basic-type".to_string(),
+            attribute_id: Attributes::Name.id().to_string(),
+            value: ValueType::String {
+                id: "string-uuid".to_string(),
+                value: "Basic Type".to_string(),
+            },
+            space: DEFAULT_SPACE.to_string(),
+        };
+
+        assert!(matches!(
+            simple_name.get_sink_action(),
+            Some(SinkAction::NameAdded { .. })
+        ));
+
+        // bootstrap the persist with a simple type
+        simple_type
+            .get_sink_action()
+            .unwrap()
+            .handle_sink_action(persist)
+            .unwrap();
+
+        // Give a name to the basic type
+        simple_name
+            .get_sink_action()
+            .unwrap()
+            .handle_sink_action(persist)
+            .unwrap();
     }
 
     #[test]
-    fn can_get_find_spaces_created() {
-        let mock_data = fs::read_to_string("./mock-data.json").unwrap();
-        let action: Action = serde_json::from_str(&mock_data).unwrap();
-        let test_spaces = vec![
-            "0xe3d08763498e3247EC00A481F199B018f2148723".to_string(),
-            "0xc46618C200f02EF1EEA28923FC3828301e63C4Bd".to_string(),
-        ];
-        //let spaces = action.get_created_spaces();
-        //assert_eq!(spaces, test_spaces);
+    fn can_get_spaces_created() {
+        let mut persist = Persist::default();
+
+        // bootstrap the persist
+        bootstrap_persist(&mut persist);
+
+        let space_created = ActionTriple::CreateTriple {
+            entity_id: "entity-id".to_string(),
+            attribute_id: Attributes::Space.id().to_string(),
+            value: ValueType::String {
+                id: "some-uuid".to_string(),
+                value: "some-space".to_string(),
+            },
+            space: DEFAULT_SPACE.to_string(),
+        };
+
+        let sink_action = space_created.get_sink_action().unwrap();
+
+        // check that the sink action is a space created action
+        assert!(matches!(sink_action, SinkAction::SpaceCreated { .. }));
+
+        // handle the sink action
+        sink_action.handle_sink_action(&mut persist).unwrap();
+
+        // check that the space was created in the persist
+        assert_eq!(persist.spaces.unwrap()[0], "some-space");
+
+        let no_space_created = ActionTriple::CreateTriple {
+            entity_id: "entity-id".to_string(),
+            attribute_id: Attributes::Attribute.id().to_string(),
+            value: ValueType::String {
+                id: "some-uuid".to_string(),
+                value: "some-space".to_string(),
+            },
+            space: DEFAULT_SPACE.to_string(),
+        };
+
+        assert!(matches!(no_space_created.get_sink_action(), None));
     }
 
     #[test]
-    fn can_decode_uri_data() {
-        //let action: Action = Action::decode_from_uri(DATA.to_string()).await;
-        //println!("{:?}", action);
+    fn can_get_attribute_added() {
+        let mut persist = Persist::default();
+
+        bootstrap_persist(&mut persist);
+
+        // make the entity-id a type
+        let action = ActionTriple::CreateTriple {
+            entity_id: "entity-id".to_string(),
+            attribute_id: Attributes::Type.id().to_string(),
+            value: ValueType::Entity {
+                id: "type-uuid".to_string(),
+            },
+            space: DEFAULT_SPACE.to_string(),
+        };
+
+        let sink_action = action.get_sink_action().unwrap();
+
+        assert!(matches!(sink_action, SinkAction::TypeCreated { .. }));
+
+        sink_action.handle_sink_action(&mut persist).unwrap();
+
+        // add the basic-type as an attribute
+        let action = ActionTriple::CreateTriple {
+            entity_id: "entity-id".to_string(),
+            attribute_id: Attributes::Attribute.id().to_string(),
+            value: ValueType::Entity {
+                id: "basic-type".to_string(),
+            },
+            space: DEFAULT_SPACE.to_string(),
+        };
+
+        let sink_action = action.get_sink_action().unwrap();
+
+        assert!(matches!(sink_action, SinkAction::AttributeAdded { .. }));
+
+        sink_action.handle_sink_action(&mut persist).unwrap();
+
+        let attribute_map = persist.attributes.unwrap();
+        let type_map = persist.types.unwrap();
+
+        let attribute = attribute_map.get("basic-type").unwrap();
+
+        assert_eq!(attribute.name, "Basic Type");
+        assert_eq!(attribute.entity_id, "basic-type");
+
+        // the entity-id have the basic-type as an attribute
+        let type_ = type_map.get("entity-id").unwrap();
+
+        assert_eq!(type_.attributes, vec!["basic-type".to_string()]);
     }
 }

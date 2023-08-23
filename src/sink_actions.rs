@@ -2,7 +2,6 @@ use std::process;
 
 use crate::{persist::Persist, triples::ValueType};
 
-// TODO Add AttributeAdded
 #[derive(Debug)]
 /// This enum represents different actions that the sink should handle. Actions being specific changes to the graph.
 pub enum SinkAction {
@@ -39,6 +38,8 @@ pub enum SinkAction {
         entity_id: String,
         /// The ID of the attribute entity
         attribute_id: String,
+        /// The value of the triple
+        value: ValueType,
     },
 
     /// We care about a name being added to an entity because we need this when adding attributes to a type in the graph.
@@ -52,6 +53,7 @@ pub enum SinkAction {
     ValueTypeAdded {
         space: String,
         entity_id: String,
+        attribute_id: String,
         value_type: ValueType,
     },
 }
@@ -79,13 +81,17 @@ impl SinkAction {
                 space,
                 entity_id,
                 attribute_id,
-            } => {
-                persist.add_attribute(entity_id, attribute_id, space);
-                println!(
-                    "Attribute added: {:?} in space {:?} on entity {:?}",
-                    attribute_id, space, entity_id
-                );
-            }
+                value,
+            } => match value {
+                ValueType::Entity { id } => {
+                    persist.add_attribute(entity_id, id, space);
+                    println!(
+                        "Attribute added: {:?} in space {:?} on entity {:?}",
+                        attribute_id, space, entity_id
+                    );
+                }
+                _ => {}
+            },
 
             SinkAction::NameAdded {
                 space,
@@ -98,14 +104,15 @@ impl SinkAction {
 
             SinkAction::ValueTypeAdded {
                 space,
-                entity_id,
+                attribute_id,
                 value_type,
+                entity_id: _,
             } => {
                 println!(
-                    "ValueType added on entity {:?} in space {:?}",
-                    entity_id, space
+                    "ValueType added to attribute {:?} in space {:?}",
+                    attribute_id, space
                 );
-                persist.add_value_type(entity_id, value_type.clone());
+                persist.add_value_type(attribute_id, value_type.clone());
             }
         };
         Ok(())

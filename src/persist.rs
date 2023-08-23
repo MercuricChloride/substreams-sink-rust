@@ -1,11 +1,10 @@
 use std::{collections::HashMap, fs::File};
 
-use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 
 use crate::triples::ValueType;
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Persist {
     /// The cursor to start from
     //pub cursor: Option<String>,
@@ -21,18 +20,35 @@ pub struct Persist {
     pub value_types: Option<HashMap<String, ValueType>>,
 }
 
-impl Persist {
-    pub fn from_file(path: Option<String>) -> Self {
-        let file;
-
-        if let Some(path) = path {
-            file = File::open(path).unwrap();
-        } else {
-            file = File::open("persist.json").unwrap();
-        };
-
-        serde_json::from_reader(file).unwrap()
+impl Default for Persist {
+    fn default() -> Self {
+        Self {
+            types: Some(HashMap::new()),
+            spaces: Some(vec![]),
+            attributes: Some(HashMap::new()),
+            names: Some(HashMap::new()),
+            value_types: Some(HashMap::new()),
+        }
     }
+}
+
+impl Persist {
+    // pub fn from_file(path: Option<String>) -> Self {
+    //     let file;
+
+    //     if let Some(path) = path {
+    //         file = File::open(path).unwrap();
+    //     } else {
+    //         file = File::open("persist.json").unwrap();
+    //     };
+
+    //     serde_json::from_reader(file).unwrap()
+    // }
+
+    // pub fn save_to_file(&self, path: String) {
+    //     let file = File::create(path).unwrap();
+    //     serde_json::to_writer(file, &self).unwrap();
+    // }
 
     pub fn open() -> Self {
         if let Ok(opened_file) = File::open("persist.json") {
@@ -46,11 +62,6 @@ impl Persist {
 
     pub fn save(&self) {
         let file = File::create("persist.json").unwrap();
-        serde_json::to_writer(file, &self).unwrap();
-    }
-
-    pub fn save_to_file(&self, path: String) {
-        let file = File::create(path).unwrap();
         serde_json::to_writer(file, &self).unwrap();
     }
 
@@ -88,16 +99,43 @@ impl Persist {
 
     /// entity_id is the id of the entity that the attribute was added to
     pub fn add_attribute(&mut self, entity_id: &String, attribute_id: &String, space: &String) {
-        if let Some(types) = &mut self.types {
-            if let Some(type_) = types.get_mut(entity_id) {
-                type_.attributes.push(attribute_id.clone());
-            } else {
-                self.add_type(entity_id, space);
-                self.add_attribute(entity_id, attribute_id, space);
-            }
-        } else {
-            panic!("Tried to add an attribute before types was initialized in the persist");
-        }
+        // get the attributes map
+        let attributes = self.attributes.as_mut().unwrap();
+
+        // get the types map
+        let types = self.types.as_mut().unwrap();
+
+        // get the names map
+        let names = self.names.as_mut().unwrap();
+
+        // get the type of the attribute_id, because all attributes should be a type
+        let _ = types
+            .get_mut(attribute_id)
+            .expect("No type found for the attribute");
+
+        // get the type of the entity_id, because it too should be a type
+        let entity_type = types
+            .get_mut(entity_id)
+            .expect("No type found for the entity");
+
+        // get the name of the attribute
+        let attribute_name = names
+            .get(attribute_id)
+            .expect("No name found for the attribute");
+
+        // create the attribute
+        let attribute = Attribute {
+            entity_id: attribute_id.clone(),
+            name: attribute_name.clone(),
+            space: Some(space.clone()),
+            value: None,
+        };
+
+        // add the attribute to the attributes map
+        attributes.insert(attribute_id.clone(), attribute);
+
+        // add the attribute to the entity type
+        entity_type.attributes.push(attribute_id.clone());
     }
 
     pub fn add_name(&mut self, entity_id: &String, name: &String) {
@@ -111,12 +149,20 @@ impl Persist {
     }
 
     pub fn add_value_type(&mut self, entity_id: &String, value_type: ValueType) {
-        if let Some(value_types) = &mut self.value_types {
+        if self.value_types.is_none() {
+            self.value_types = Some(HashMap::new());
+        }
+        if self.attributes.is_none() {
+            self.attributes = Some(HashMap::new());
+        }
+
+        let value_types = self.value_types.as_mut().unwrap();
+
+        let attributes = self.attributes.as_mut().unwrap();
+
+        // if the entity_id is an attribute, we will store the value type as a value type for the attribute
+        if let Some(_) = attributes.get(entity_id) {
             value_types.insert(entity_id.clone(), value_type);
-        } else {
-            let mut value_types = HashMap::new();
-            value_types.insert(entity_id.clone(), value_type);
-            self.value_types = Some(value_types);
         }
     }
 }
@@ -135,5 +181,6 @@ pub struct Type {
 pub struct Attribute {
     pub entity_id: String,
     pub name: String,
-    pub value: ValueType,
+    pub value: Option<ValueType>,
+    pub space: Option<String>,
 }
