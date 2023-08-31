@@ -1,5 +1,7 @@
 use std::process;
 
+use tokio_postgres::Client;
+
 use crate::{persist::Persist, triples::ValueType};
 
 #[derive(Debug)]
@@ -8,7 +10,7 @@ pub enum SinkAction {
     /// This action denotes a newly created space. The string is the address of the space.
     /// We care about this in the sink because when a new space is created, we need to deploy
     /// a new subgraph for that space.
-    SpaceCreated { space: String },
+    SpaceCreated { entity_id: String, space: String },
 
     /// This action denotes a newly created type. The string is the name of the type.
     /// We care about this in the sink because when a new type is created, we need to deploy
@@ -56,41 +58,137 @@ pub enum SinkAction {
         attribute_id: String,
         value_type: ValueType,
     },
+
+    /// Spaces can have subspaces, and we need to know when a subspace is added to a space so we can deploy a new subgraph for that space.
+    SubspaceAdded {
+        parent_space: String,
+        child_space: String,
+    },
+
+    /// Spaces can also remove subspaces, and we need to know when a subspace is removed from a space
+    SubspaceRemoved {
+        parent_space: String,
+        child_space: String,
+    },
 }
 
 impl SinkAction {
     pub fn handle_sink_action(&self, persist: &mut Persist) -> Result<(), String> {
         match &self {
-            SinkAction::SpaceCreated { space } => {
-                // push the space to the persist
-                persist.push_space(space.to_string());
-                let command = format!(
-                    "(cd external/subgraph && ./deploy.sh mercuricchloride/geo-test {})",
-                    space
+            SinkAction::SpaceCreated { entity_id, space } => {
+                let query = format!(
+                    "INSERT INTO spaces (id, space) VALUES ('{}', '{}')",
+                    entity_id, space
                 );
-                println!("Deploying subgraph for space: {}", space);
-                process::Command::new(command);
+
+                persist.tasks.push(query);
+
+                // push the space to the persist
+                //persist.add_space(entity_id.to_string(), space.to_string());
+
+                //let command = format!(
+                //"(cd external/subgraph && ./deploy.sh mercuricchloride/geo-test {})",
+                //space
+                //);
+
+                //println!("Deploying subgraph for space: {}", space);
+                //process::Command::new(command);
             }
 
             SinkAction::TypeCreated { entity_id, space } => {
-                persist.add_type(entity_id, space);
-                println!("Type added: {:?} in space {:?}", entity_id, space);
+                let query = format!(
+                    "INSERT INTO entity_types (id, space) VALUES ('{}', '{}')",
+                    entity_id, space
+                );
+
+                persist.tasks.push(query);
+
+                let table_creation = format!(
+                    "
+DO $$
+DECLARE
+  new_table_name TEXT;
+BEGIN
+  -- Generate the new table name based on the existing table name
+  SELECT name INTO new_table_name FROM entity_names WHERE id = '{}';
+
+  EXECUTE 'CREATE TABLE ' || new_table_name || ' (id TEXT)';
+END $$;
+",
+                    entity_id
+                );
+
+                persist.retry_tasks.push(table_creation);
+
+                //persist.add_type(entity_id, space);
+                //println!("Type added: {:?} in space {:?}", entity_id, space);
             }
 
             SinkAction::AttributeAdded {
                 space,
                 entity_id,
-                attribute_id,
+                attribute_id: _,
                 value,
             } => match value {
+                // TODO Clean this up
                 ValueType::Entity { id } => {
-                    persist.add_attribute(entity_id, id, space);
-                    println!(
-                        "Attribute added: {:?} in space {:?} on entity {:?}",
-                        attribute_id, space, entity_id
+                    let query = format!(
+                        "INSERT INTO entity_attributes (id, belongs_to) VALUES ('{}', '{}')",
+                        id, entity_id
                     );
+
+                    persist.tasks.push(query);
+
+                    let column_creation = format!(
+                        "
+DO $$
+DECLARE
+    new_column TEXT;
+BEGIN
+    -- Generate the new column name based on the existing column name
+    SELECT name INTO new_column FROM entity_names WHERE id = '{}';
+
+    -- Create a new column on the table
+    EXECUTE 'ALTER TABLE {} ADD COLUMN ' || new_column || ' {} ';
+END $$;
+",
+                        id,
+                        entity_id,
+                        value.sql_type()
+                    );
+                    persist.retry_tasks.push(column_creation);
                 }
-                _ => {}
+
+                _ => {
+                    let query = format!(
+                        "INSERT INTO entity_attributes (id, belongs_to) VALUES ('{}', '{}')",
+                        value.id(),
+                        entity_id
+                    );
+
+                    persist.tasks.push(query);
+
+                    let column_creation = format!(
+                        "
+DO $$
+DECLARE
+    new_column TEXT;
+    parent_table TEXT;
+BEGIN
+    -- Generate the new column name based on the existing column name
+    SELECT name INTO new_column FROM entity_names WHERE id = '{}';
+    SELECT name INTO parent_table FROM entity_names WHERE id = '{}';
+
+    -- Create a new column on the table
+    EXECUTE 'ALTER TABLE ' || parent_table || ' ADD COLUMN ' || new_column || ' {};';
+END $$;
+",
+                        value.id(),
+                        entity_id,
+                        value.sql_type()
+                    );
+                    persist.retry_tasks.push(column_creation);
+                }
             },
 
             SinkAction::NameAdded {
@@ -98,21 +196,67 @@ impl SinkAction {
                 entity_id,
                 name,
             } => {
-                println!("Name added on entity {:?} in space {:?}", entity_id, space);
-                persist.add_name(entity_id, name);
+                //println!("Name added on entity {:?} in space {:?}", entity_id, space);
+
+                let query = format!(
+                    "INSERT INTO entity_names (id, name, space) VALUES ('{}', '{}', '{}')",
+                    entity_id, name, space
+                );
+
+                persist.tasks.push(query);
             }
 
             SinkAction::ValueTypeAdded {
                 space,
-                attribute_id,
+                attribute_id: _,
                 value_type,
-                entity_id: _,
+                entity_id,
             } => {
-                println!(
-                    "ValueType added to attribute {:?} in space {:?}",
-                    attribute_id, space
+                // println!(
+                //     "ValueType added to entity {:?} in space {:?}",
+                //     entity_id, space
+                // );
+
+                let query = format!(
+                    "INSERT INTO entity_value_types (id, value_type, space) VALUES ('{}', '{}', '{}')",
+                    entity_id, value_type.id(), space
                 );
-                persist.add_value_type(attribute_id, value_type.clone());
+
+                persist.tasks.push(query);
+            }
+
+            SinkAction::SubspaceAdded {
+                parent_space,
+                child_space,
+            } => {
+                // println!(
+                //     "Subspace added to space {:?} with child space {:?}",
+                //     parent_space, child_space
+                // );
+
+                let query = format!(
+                    "INSERT INTO subspaces (id, subspace_of) VALUES ('{}', '{}')",
+                    child_space, parent_space
+                );
+
+                persist.tasks.push(query);
+            }
+
+            SinkAction::SubspaceRemoved {
+                parent_space,
+                child_space,
+            } => {
+                // println!(
+                //     "Subspace removed from space {:?} with child space {:?}",
+                //     parent_space, child_space
+                // );
+
+                let query = format!(
+                    "DELETE FROM subspaces WHERE id = '{}' AND subspace_of = '{}'",
+                    child_space, parent_space
+                );
+
+                persist.tasks.push(query);
             }
         };
         Ok(())

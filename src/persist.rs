@@ -1,116 +1,140 @@
 use std::{collections::HashMap, fs::File};
 
+use futures03::future::join_all;
 use serde::{Deserialize, Serialize};
+use tokio_postgres::Client;
 
 use crate::triples::ValueType;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Persist {
-    /// The cursor to start from
-    //pub cursor: Option<String>,
+    #[serde(default)]
+    /// A stack of all the queries to the DB we need to do
+    pub tasks: Vec<String>,
+
+    #[serde(default)]
+    /// A stack of queries to the DB that may fail / be retried
+    pub retry_tasks: Vec<String>,
+
+    #[serde(default)]
     /// A map from entity id -> fields
-    pub types: Option<HashMap<String, Type>>,
-    /// An array of spaces created
-    pub spaces: Option<Vec<String>>,
+    pub types: HashMap<String, Type>,
+
+    #[serde(default)]
+    /// A map from entity-id to address of a space
+    pub spaces: HashMap<String, String>,
+
+    #[serde(default)]
+    /// A map from entity-id to a vector of subspaces
+    pub subspaces: HashMap<String, Vec<String>>,
+
+    #[serde(default)]
     /// A map from attribute id -> attribute
-    pub attributes: Option<HashMap<String, Attribute>>,
+    pub attributes: HashMap<String, Attribute>,
+
+    #[serde(default)]
     /// A map from entity id -> name
-    pub names: Option<HashMap<String, String>>,
+    pub names: HashMap<String, String>,
+
+    #[serde(default)]
     /// A map from entity id -> value type
-    pub value_types: Option<HashMap<String, ValueType>>,
+    pub value_types: HashMap<String, ValueType>,
 }
 
 impl Default for Persist {
     fn default() -> Self {
         Self {
-            types: Some(HashMap::new()),
-            spaces: Some(vec![]),
-            attributes: Some(HashMap::new()),
-            names: Some(HashMap::new()),
-            value_types: Some(HashMap::new()),
+            tasks: vec![],
+            retry_tasks: vec![],
+            types: HashMap::new(),
+            spaces: HashMap::new(),
+            subspaces: HashMap::new(),
+            attributes: HashMap::new(),
+            names: HashMap::new(),
+            value_types: HashMap::new(),
         }
     }
 }
 
+// NOTE: I might want to add functions for loading and saving from a non-defaut file
 impl Persist {
-    // pub fn from_file(path: Option<String>) -> Self {
-    //     let file;
-
-    //     if let Some(path) = path {
-    //         file = File::open(path).unwrap();
-    //     } else {
-    //         file = File::open("persist.json").unwrap();
-    //     };
-
-    //     serde_json::from_reader(file).unwrap()
-    // }
-
-    // pub fn save_to_file(&self, path: String) {
-    //     let file = File::create(path).unwrap();
-    //     serde_json::to_writer(file, &self).unwrap();
-    // }
-
     pub fn open() -> Self {
         if let Ok(opened_file) = File::open("persist.json") {
             serde_json::from_reader(opened_file).unwrap()
         } else {
             let persist = Self::default();
-            persist.save();
+            //persist.save();
             persist
         }
     }
 
-    pub fn save(&self) {
-        let file = File::create("persist.json").unwrap();
-        serde_json::to_writer(file, &self).unwrap();
+    /// This function will process all of the tasks in the task queue, and then clear the queue
+    pub async fn save(&mut self, client: &Client) {
+        // process all tasks that are not in the retry queue
+        join_all(self.tasks.iter().map(|x| client.execute(x, &[]))).await;
+
+        self.tasks.clear();
+
+        // process all tasks that are in the retry queue
+        let retry_tasks = join_all(self.retry_tasks.iter().map(|x| client.execute(x, &[]))).await;
+
+        let mut tasks_to_retry = vec![];
+
+        // if any of the retry tasks failed, add them back to the task queue
+        for (index, task) in retry_tasks.iter().enumerate() {
+            if let Err(_) = task {
+                tasks_to_retry.push(self.retry_tasks[index].clone());
+            }
+        }
+
+        self.retry_tasks = tasks_to_retry;
     }
 
-    pub fn push_space(&mut self, space: String) {
-        if let Some(spaces) = &mut self.spaces {
-            spaces.push(space);
+    pub fn add_space(&mut self, entity_id: String, space: String) {
+        self.spaces.insert(entity_id, space);
+    }
+
+    pub fn add_subspace(&mut self, parent_space: String, child_space: String) {
+        let subspaces = self.subspaces.entry(parent_space).or_insert(vec![]);
+        if !subspaces.contains(&child_space) {
+            subspaces.push(child_space);
         } else {
-            self.spaces = Some(vec![space]);
+            println!("Subspace already exists");
+        }
+    }
+
+    pub fn remove_subspace(&mut self, parent_space: String, child_space: String) {
+        let subspaces = self.subspaces.entry(parent_space).or_insert(vec![]);
+        if let Some(index) = subspaces.iter().position(|x| *x == child_space) {
+            subspaces.remove(index);
+        } else {
+            println!("Subspace does not exist");
         }
     }
 
     pub fn add_type(&mut self, entity_id: &String, space: &String) {
-        if let Some(types) = &mut self.types {
-            types.insert(
-                entity_id.clone(),
-                Type {
-                    entity_id: entity_id.clone(),
-                    space: space.clone(),
-                    attributes: vec![],
-                },
-            );
-        } else {
-            let mut types = HashMap::new();
-            types.insert(
-                entity_id.clone(),
-                Type {
-                    entity_id: entity_id.clone(),
-                    space: space.clone(),
-                    attributes: vec![],
-                },
-            );
-            self.types = Some(types);
-        }
+        self.types.insert(
+            entity_id.clone(),
+            Type {
+                entity_id: entity_id.clone(),
+                space: space.clone(),
+                attributes: vec![],
+            },
+        );
     }
 
     /// entity_id is the id of the entity that the attribute was added to
     pub fn add_attribute(&mut self, entity_id: &String, attribute_id: &String, space: &String) {
-        // get the attributes map
-        let attributes = self.attributes.as_mut().unwrap();
-
-        // get the types map
-        let types = self.types.as_mut().unwrap();
-
-        // get the names map
-        let names = self.names.as_mut().unwrap();
+        let Self {
+            attributes,
+            types,
+            names,
+            ..
+        } = self;
 
         // get the type of the attribute_id, because all attributes should be a type
         let _ = types
-            .get_mut(attribute_id)
+            .get(attribute_id)
             .expect("No type found for the attribute");
 
         // get the type of the entity_id, because it too should be a type
@@ -139,31 +163,12 @@ impl Persist {
     }
 
     pub fn add_name(&mut self, entity_id: &String, name: &String) {
-        if let Some(names) = &mut self.names {
-            names.insert(entity_id.clone(), name.clone());
-        } else {
-            let mut names = HashMap::new();
-            names.insert(entity_id.clone(), name.clone());
-            self.names = Some(names);
-        }
+        self.names.insert(entity_id.clone(), name.clone());
     }
 
     pub fn add_value_type(&mut self, entity_id: &String, value_type: ValueType) {
-        if self.value_types.is_none() {
-            self.value_types = Some(HashMap::new());
-        }
-        if self.attributes.is_none() {
-            self.attributes = Some(HashMap::new());
-        }
-
-        let value_types = self.value_types.as_mut().unwrap();
-
-        let attributes = self.attributes.as_mut().unwrap();
-
-        // if the entity_id is an attribute, we will store the value type as a value type for the attribute
-        if let Some(_) = attributes.get(entity_id) {
-            value_types.insert(entity_id.clone(), value_type);
-        }
+        // NOTE Should something be forced to be an attribute if it's a valueType?
+        self.value_types.insert(entity_id.clone(), value_type);
     }
 }
 
@@ -173,7 +178,7 @@ pub struct Type {
     pub entity_id: String,
     /// The space that this type was created in
     pub space: String,
-    /// An array of Attributes that are attributes of this type
+    /// An array of entity-ids that are attributes of this type
     pub attributes: Vec<String>,
 }
 

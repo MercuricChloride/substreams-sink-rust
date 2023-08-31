@@ -1,14 +1,17 @@
 use anyhow::{format_err, Context, Error};
+use clap::Parser;
 use futures03::{future::join_all, StreamExt};
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
 
 use persist::Persist;
 use prost::Message;
-use std::io::Write;
+use std::io::Read;
 use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
+
+use tokio_postgres::{Client, NoTls};
 
 use crate::pb::schema::EntriesAdded;
 use crate::triples::Action;
@@ -21,32 +24,75 @@ mod substreams;
 mod substreams_stream;
 mod triples;
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Substreams endpoint
+    #[arg(short, long)]
+    #[clap(index = 1)]
+    substreams_endpoint: String,
+
+    /// Path or link to spkg
+    #[arg(short, long)]
+    #[clap(index = 2)]
+    spkg: String,
+
+    /// Module name
+    #[arg(short, long)]
+    #[clap(index = 3)]
+    module: String,
+
+    /// Postgres host
+    #[arg(short, long)]
+    host: String,
+
+    /// Postgres username
+    #[arg(short, long)]
+    username: String,
+
+    /// Postgres password
+    #[arg(short, long)]
+    password: String,
+
+    /// Postgres port, default 5432
+    #[arg(short, long, default_value = "5432")]
+    port: String,
+
+    /// Substreams API token, if not provided, SUBSTREAMS_API_TOKEN environment variable will be used
+    #[arg(short, long, env = "SUBSTREAMS_API_TOKEN")]
+    token: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let args = env::args();
-    if args.len() != 4 {
-        println!("usage: stream <endpoint> <spkg> <module>");
-        println!();
-        println!("The environment variable SUBSTREAMS_API_TOKEN must be set also");
-        println!("and should contain a valid Substream API token.");
-        exit(1);
-    }
-
-    let endpoint_url = env::args().nth(1).unwrap();
-    let package_file = env::args().nth(2).unwrap();
-    let module_name = env::args().nth(3).unwrap();
-
-    let token_env = env::var("SUBSTREAMS_API_TOKEN").unwrap_or("".to_string());
-    let mut token: Option<String> = None;
-
-    if token_env.len() > 0 {
-        token = Some(token_env);
-    }
+    let Args {
+        substreams_endpoint: endpoint_url,
+        spkg: package_file,
+        module: module_name,
+        token,
+        host,
+        username,
+        password,
+        port,
+    } = Args::parse();
 
     let package = read_package(&package_file).await?;
-    let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, token).await?);
+    let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, Some(token)).await?);
 
-    let cursor: Option<String> = load_persisted_cursor()?;
+    let connection_string = format!(
+        "host={} user={} port={} password={}",
+        host, username, port, password
+    );
+
+    let (client, connection) = tokio_postgres::connect(&connection_string, NoTls).await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    let cursor: Option<String> = load_persisted_cursor(&client).await?;
 
     let mut stream = SubstreamsStream::new(
         endpoint.clone(),
@@ -55,7 +101,7 @@ async fn main() -> Result<(), Error> {
         module_name.to_string(),
         // Start/stop block are not handled within this project, feel free to play with it
         36472424,
-        0,
+        46904315,
     );
 
     loop {
@@ -65,12 +111,11 @@ async fn main() -> Result<(), Error> {
                 break;
             }
             Some(Ok(BlockResponse::New(data))) => {
-                process_block_scoped_data(&data).await?;
-                persist_cursor(data.cursor)?;
+                process_block_scoped_data(&data, &client).await?;
             }
             Some(Ok(BlockResponse::Undo(undo_signal))) => {
                 process_block_undo_signal(&undo_signal)?;
-                persist_cursor(undo_signal.last_valid_cursor)?;
+                //persist_cursor(undo_signal.last_valid_cursor, &client).await?;
             }
             Some(Err(err)) => {
                 println!();
@@ -84,7 +129,7 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> {
+async fn process_block_scoped_data(data: &BlockScopedData, client: &Client) -> Result<(), Error> {
     // You can decode the actual Any type received using this code:
     //
     //     use prost::Message;
@@ -112,7 +157,9 @@ async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> 
                 .map(Action::decode_from_entry)
                 .collect();
 
+            println!("Fetching all ipfs entries...");
             let entries = join_all(entries_to_fetch).await;
+            println!("Got all ipfs entries!");
 
             let sink_actions = entries
                 .iter()
@@ -122,13 +169,19 @@ async fn process_block_scoped_data(data: &BlockScopedData) -> Result<(), Error> 
 
             let mut persist: Persist = Persist::open();
 
+            println!("Handling all sink actions...");
             for sink_action in sink_actions {
                 sink_action
                     .handle_sink_action(&mut persist)
                     .expect("Couldn't Handle Sink Action");
             }
 
-            persist.save();
+            println!("Saving all sink actions...");
+
+            persist.save(&client).await;
+
+            // if the data isn't empty, lets store the cursor
+            persist_cursor(&data.cursor, &client).await?;
         }
     }
 
@@ -145,18 +198,28 @@ fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyho
     unimplemented!("you must implement some kind of block undo handling, or request only final blocks (tweak substreams_stream.rs)")
 }
 
-fn persist_cursor(_cursor: String) -> Result<(), anyhow::Error> {
-    let mut file = std::fs::File::create("cursor.txt")?;
-    file.write_all(_cursor.as_bytes())?;
+async fn persist_cursor(_cursor: &String, client: &Client) -> Result<(), anyhow::Error> {
+    let rows_changed = client
+        .execute("UPDATE cursors set cursor = $1 where id = 0", &[_cursor])
+        .await?;
+
+    println!("updated {} rows", rows_changed);
 
     Ok(())
 }
 
-fn load_persisted_cursor() -> Result<Option<String>, anyhow::Error> {
-    if let Ok(cursor) = std::fs::read_to_string("cursor.txt") {
-        return Ok(Some(cursor));
+async fn load_persisted_cursor(client: &Client) -> Result<Option<String>, anyhow::Error> {
+    let row = client
+        .query_one("SELECT cursor FROM cursors WHERE id=0", &[])
+        .await?;
+    let cursor: &str = row.get("cursor");
+
+    println!("Found cursor: {}", cursor);
+
+    match cursor {
+        s if s.starts_with("") => Ok(None),
+        _ => Ok(Some(cursor.to_string())),
     }
-    Ok(None)
 }
 
 async fn read_package(input: &str) -> Result<Package, anyhow::Error> {

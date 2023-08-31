@@ -10,6 +10,7 @@ pub enum Attributes {
     Space,
     Name,
     ValueType,
+    Subspace,
 }
 
 impl Attributes {
@@ -21,6 +22,7 @@ impl Attributes {
             Attributes::Space => "space",
             Attributes::Name => "name",
             Attributes::ValueType => "ee26ef23-f7f1-4eb6-b742-3b0fa38c1fd8",
+            Attributes::Subspace => "442e1850-9de7-4002-a065-7bc8fcff2514",
         }
     }
 
@@ -31,6 +33,7 @@ impl Attributes {
             Attributes::Space => "Space",
             Attributes::Name => "Name",
             Attributes::ValueType => "ValueType",
+            Attributes::Subspace => "Subspace",
         }
     }
 }
