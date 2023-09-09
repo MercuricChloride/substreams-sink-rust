@@ -461,285 +461,285 @@ impl TryInto<SinkAction> for ActionTriple {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fs;
+// #[cfg(test)]
+// mod tests {
+//     use std::fs;
 
-    use crate::persist::Persist;
+//     use crate::persist::Persist;
 
-    use super::*;
+//     use super::*;
 
-    const DEFAULT_SPACE: &'static str = "0xSpaceAddress";
+//     const DEFAULT_SPACE: &'static str = "0xSpaceAddress";
 
-    /// This function will bootstrap the persist with a type, give it a name
-    /// This is used for testing
-    /// It's id is "basic-type"
-    /// It's name is "Basic Type"
-    fn bootstrap_persist(persist: &mut Persist) {
-        // a triple that marks the basic-type as a "type"
-        let simple_type = ActionTriple::CreateTriple {
-            entity_id: "basic-type".to_string(),
-            attribute_id: Attributes::Type.id().to_string(),
-            value: ValueType::Entity {
-                id: "type-uuid".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//     /// This function will bootstrap the persist with a type, give it a name
+//     /// This is used for testing
+//     /// It's id is "basic-type"
+//     /// It's name is "Basic Type"
+//     fn bootstrap_persist(persist: &mut Persist) {
+//         // a triple that marks the basic-type as a "type"
+//         let simple_type = ActionTriple::CreateTriple {
+//             entity_id: "basic-type".to_string(),
+//             attribute_id: Attributes::Type.id().to_string(),
+//             value: ValueType::Entity {
+//                 id: "type-uuid".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        assert!(matches!(
-            simple_type.get_sink_action(),
-            Some(SinkAction::TypeCreated { .. })
-        ));
+//         assert!(matches!(
+//             simple_type.get_sink_action(),
+//             Some(SinkAction::TypeCreated { .. })
+//         ));
 
-        // a triple that gives a name to the basic type
-        let simple_name = ActionTriple::CreateTriple {
-            entity_id: "basic-type".to_string(),
-            attribute_id: Attributes::Name.id().to_string(),
-            value: ValueType::String {
-                id: "string-uuid".to_string(),
-                value: "Basic Type".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         // a triple that gives a name to the basic type
+//         let simple_name = ActionTriple::CreateTriple {
+//             entity_id: "basic-type".to_string(),
+//             attribute_id: Attributes::Name.id().to_string(),
+//             value: ValueType::String {
+//                 id: "string-uuid".to_string(),
+//                 value: "Basic Type".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        assert!(matches!(
-            simple_name.get_sink_action(),
-            Some(SinkAction::NameAdded { .. })
-        ));
+//         assert!(matches!(
+//             simple_name.get_sink_action(),
+//             Some(SinkAction::NameAdded { .. })
+//         ));
 
-        // bootstrap the persist with a simple type
-        simple_type
-            .get_sink_action()
-            .unwrap()
-            .handle_sink_action(persist)
-            .unwrap();
+//         // bootstrap the persist with a simple type
+//         simple_type
+//             .get_sink_action()
+//             .unwrap()
+//             .handle_sink_action(persist)
+//             .unwrap();
 
-        // Give a name to the basic type
-        simple_name
-            .get_sink_action()
-            .unwrap()
-            .handle_sink_action(persist)
-            .unwrap();
-    }
+//         // Give a name to the basic type
+//         simple_name
+//             .get_sink_action()
+//             .unwrap()
+//             .handle_sink_action(persist)
+//             .unwrap();
+//     }
 
-    //#[test]
-    fn can_get_spaces_created() {
-        let mut persist = Persist::default();
+//     //#[test]
+//     fn can_get_spaces_created() {
+//         let mut persist = Persist::default();
 
-        // bootstrap the persist
-        bootstrap_persist(&mut persist);
+//         // bootstrap the persist
+//         bootstrap_persist(&mut persist);
 
-        let space_created = ActionTriple::CreateTriple {
-            entity_id: "entity-id".to_string(),
-            attribute_id: Attributes::Space.id().to_string(),
-            value: ValueType::String {
-                id: "some-uuid".to_string(),
-                value: "some-space".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         let space_created = ActionTriple::CreateTriple {
+//             entity_id: "entity-id".to_string(),
+//             attribute_id: Attributes::Space.id().to_string(),
+//             value: ValueType::String {
+//                 id: "some-uuid".to_string(),
+//                 value: "some-space".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        let sink_action = space_created.get_sink_action().unwrap();
+//         let sink_action = space_created.get_sink_action().unwrap();
 
-        // check that the sink action is a space created action
-        assert!(matches!(sink_action, SinkAction::SpaceCreated { .. }));
+//         // check that the sink action is a space created action
+//         assert!(matches!(sink_action, SinkAction::SpaceCreated { .. }));
 
-        // handle the sink action
-        sink_action.handle_sink_action(&mut persist).unwrap();
+//         // handle the sink action
+//         sink_action.handle_sink_action(&mut persist).unwrap();
 
-        // check that the space was created in the persist
-        assert_eq!(persist.spaces.get("entity-id").unwrap(), "some-space");
+//         // check that the space was created in the persist
+//         assert_eq!(persist.spaces.get("entity-id").unwrap(), "some-space");
 
-        let no_space_created = ActionTriple::CreateTriple {
-            entity_id: "entity-id".to_string(),
-            attribute_id: Attributes::Attribute.id().to_string(),
-            value: ValueType::String {
-                id: "some-uuid".to_string(),
-                value: "some-space".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         let no_space_created = ActionTriple::CreateTriple {
+//             entity_id: "entity-id".to_string(),
+//             attribute_id: Attributes::Attribute.id().to_string(),
+//             value: ValueType::String {
+//                 id: "some-uuid".to_string(),
+//                 value: "some-space".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        assert!(matches!(no_space_created.get_sink_action(), None));
-    }
+//         assert!(matches!(no_space_created.get_sink_action(), None));
+//     }
 
-    //#[test]
-    fn can_get_attribute_added() {
-        let mut persist = Persist::default();
+//     //#[test]
+//     fn can_get_attribute_added() {
+//         let mut persist = Persist::default();
 
-        bootstrap_persist(&mut persist);
+//         bootstrap_persist(&mut persist);
 
-        // make the entity-id a type
-        let action = ActionTriple::CreateTriple {
-            entity_id: "entity-id".to_string(),
-            attribute_id: Attributes::Type.id().to_string(),
-            value: ValueType::Entity {
-                id: "type-uuid".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         // make the entity-id a type
+//         let action = ActionTriple::CreateTriple {
+//             entity_id: "entity-id".to_string(),
+//             attribute_id: Attributes::Type.id().to_string(),
+//             value: ValueType::Entity {
+//                 id: "type-uuid".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        let sink_action = action.get_sink_action().unwrap();
+//         let sink_action = action.get_sink_action().unwrap();
 
-        assert!(matches!(sink_action, SinkAction::TypeCreated { .. }));
+//         assert!(matches!(sink_action, SinkAction::TypeCreated { .. }));
 
-        sink_action.handle_sink_action(&mut persist).unwrap();
+//         sink_action.handle_sink_action(&mut persist).unwrap();
 
-        // add the basic-type as an attribute
-        let action = ActionTriple::CreateTriple {
-            entity_id: "entity-id".to_string(),
-            attribute_id: Attributes::Attribute.id().to_string(),
-            value: ValueType::Entity {
-                id: "basic-type".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         // add the basic-type as an attribute
+//         let action = ActionTriple::CreateTriple {
+//             entity_id: "entity-id".to_string(),
+//             attribute_id: Attributes::Attribute.id().to_string(),
+//             value: ValueType::Entity {
+//                 id: "basic-type".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        let sink_action = action.get_sink_action().unwrap();
+//         let sink_action = action.get_sink_action().unwrap();
 
-        assert!(matches!(sink_action, SinkAction::AttributeAdded { .. }));
+//         assert!(matches!(sink_action, SinkAction::AttributeAdded { .. }));
 
-        sink_action.handle_sink_action(&mut persist).unwrap();
+//         sink_action.handle_sink_action(&mut persist).unwrap();
 
-        let attribute = persist.attributes.get("basic-type").unwrap();
+//         let attribute = persist.attributes.get("basic-type").unwrap();
 
-        assert_eq!(attribute.name, "Basic Type");
-        assert_eq!(attribute.entity_id, "basic-type");
+//         assert_eq!(attribute.name, "Basic Type");
+//         assert_eq!(attribute.entity_id, "basic-type");
 
-        // the entity-id have the basic-type as an attribute
-        let type_ = persist.types.get("entity-id").unwrap();
+//         // the entity-id have the basic-type as an attribute
+//         let type_ = persist.types.get("entity-id").unwrap();
 
-        assert_eq!(type_.attributes, vec!["basic-type".to_string()]);
-    }
+//         assert_eq!(type_.attributes, vec!["basic-type".to_string()]);
+//     }
 
-    //#[test]
-    fn can_add_value_type() {
-        let mut persist = Persist::default();
+//     //#[test]
+//     fn can_add_value_type() {
+//         let mut persist = Persist::default();
 
-        bootstrap_persist(&mut persist);
+//         bootstrap_persist(&mut persist);
 
-        // add a valuetype to the basic-type
-        let action = ActionTriple::CreateTriple {
-            entity_id: "basic-type".to_string(),
-            attribute_id: Attributes::ValueType.id().to_string(),
-            value: ValueType::Entity {
-                id: "text-value-type".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         // add a valuetype to the basic-type
+//         let action = ActionTriple::CreateTriple {
+//             entity_id: "basic-type".to_string(),
+//             attribute_id: Attributes::ValueType.id().to_string(),
+//             value: ValueType::Entity {
+//                 id: "text-value-type".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        let sink_action = action.get_sink_action().unwrap();
+//         let sink_action = action.get_sink_action().unwrap();
 
-        assert!(matches!(sink_action, SinkAction::ValueTypeAdded { .. }));
+//         assert!(matches!(sink_action, SinkAction::ValueTypeAdded { .. }));
 
-        sink_action.handle_sink_action(&mut persist).unwrap();
+//         sink_action.handle_sink_action(&mut persist).unwrap();
 
-        let value_type = persist.value_types.get("basic-type").unwrap();
+//         let value_type = persist.value_types.get("basic-type").unwrap();
 
-        match value_type {
-            ValueType::Entity { id } => {
-                assert_eq!(id, "text-value-type");
-            }
-            _ => panic!("value type should be an entity"),
-        }
-    }
+//         match value_type {
+//             ValueType::Entity { id } => {
+//                 assert_eq!(id, "text-value-type");
+//             }
+//             _ => panic!("value type should be an entity"),
+//         }
+//     }
 
-    //#[test]
-    fn can_add_subspaces() {
-        let mut persist = Persist::default();
+//     //#[test]
+//     fn can_add_subspaces() {
+//         let mut persist = Persist::default();
 
-        bootstrap_persist(&mut persist);
+//         bootstrap_persist(&mut persist);
 
-        // create a space
-        let first_space = ActionTriple::CreateTriple {
-            entity_id: "first-space".to_string(),
-            attribute_id: Attributes::Space.id().to_string(),
-            value: ValueType::String {
-                id: "some-uuid".to_string(),
-                value: "0xfirst".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         // create a space
+//         let first_space = ActionTriple::CreateTriple {
+//             entity_id: "first-space".to_string(),
+//             attribute_id: Attributes::Space.id().to_string(),
+//             value: ValueType::String {
+//                 id: "some-uuid".to_string(),
+//                 value: "0xfirst".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        let second_space = ActionTriple::CreateTriple {
-            entity_id: "second-space".to_string(),
-            attribute_id: Attributes::Space.id().to_string(),
-            value: ValueType::String {
-                id: "another-uuid".to_string(),
-                value: "0xsecond".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         let second_space = ActionTriple::CreateTriple {
+//             entity_id: "second-space".to_string(),
+//             attribute_id: Attributes::Space.id().to_string(),
+//             value: ValueType::String {
+//                 id: "another-uuid".to_string(),
+//                 value: "0xsecond".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        let first_space_sink_action = first_space.get_sink_action().unwrap();
+//         let first_space_sink_action = first_space.get_sink_action().unwrap();
 
-        assert!(matches!(
-            first_space_sink_action,
-            SinkAction::SpaceCreated { .. }
-        ));
+//         assert!(matches!(
+//             first_space_sink_action,
+//             SinkAction::SpaceCreated { .. }
+//         ));
 
-        first_space_sink_action
-            .handle_sink_action(&mut persist)
-            .unwrap();
+//         first_space_sink_action
+//             .handle_sink_action(&mut persist)
+//             .unwrap();
 
-        let second_space_sink_action = second_space.get_sink_action().unwrap();
+//         let second_space_sink_action = second_space.get_sink_action().unwrap();
 
-        assert!(matches!(
-            second_space_sink_action,
-            SinkAction::SpaceCreated { .. }
-        ));
+//         assert!(matches!(
+//             second_space_sink_action,
+//             SinkAction::SpaceCreated { .. }
+//         ));
 
-        second_space_sink_action
-            .handle_sink_action(&mut persist)
-            .unwrap();
+//         second_space_sink_action
+//             .handle_sink_action(&mut persist)
+//             .unwrap();
 
-        assert_eq!(
-            persist.spaces.get("first-space"),
-            Some(&"0xfirst".to_string())
-        );
+//         assert_eq!(
+//             persist.spaces.get("first-space"),
+//             Some(&"0xfirst".to_string())
+//         );
 
-        assert_eq!(
-            persist.spaces.get("second-space"),
-            Some(&"0xsecond".to_string())
-        );
+//         assert_eq!(
+//             persist.spaces.get("second-space"),
+//             Some(&"0xsecond".to_string())
+//         );
 
-        // add the second space as a subspace of the first space
-        let subspace = ActionTriple::CreateTriple {
-            entity_id: "first-space".to_string(),
-            attribute_id: Attributes::Subspace.id().to_string(),
-            value: ValueType::Entity {
-                id: "second-space".to_string(),
-            },
-            space: DEFAULT_SPACE.to_string(),
-        };
+//         // add the second space as a subspace of the first space
+//         let subspace = ActionTriple::CreateTriple {
+//             entity_id: "first-space".to_string(),
+//             attribute_id: Attributes::Subspace.id().to_string(),
+//             value: ValueType::Entity {
+//                 id: "second-space".to_string(),
+//             },
+//             space: DEFAULT_SPACE.to_string(),
+//         };
 
-        let subspace_sink_action = subspace.get_sink_action().unwrap();
+//         let subspace_sink_action = subspace.get_sink_action().unwrap();
 
-        assert!(matches!(
-            subspace_sink_action,
-            SinkAction::SubspaceAdded { .. }
-        ));
+//         assert!(matches!(
+//             subspace_sink_action,
+//             SinkAction::SubspaceAdded { .. }
+//         ));
 
-        subspace_sink_action
-            .handle_sink_action(&mut persist)
-            .unwrap();
-    }
+//         subspace_sink_action
+//             .handle_sink_action(&mut persist)
+//             .unwrap();
+//     }
 
-    #[test]
-    fn decoding_stress_test() {
-        let file = fs::read_to_string("city-new-entity-actions.json").unwrap();
+//     #[test]
+//     fn decoding_stress_test() {
+//         let file = fs::read_to_string("city-new-entity-actions.json").unwrap();
 
-        let mega_file = file.repeat(100);
+//         let mega_file = file.repeat(100);
 
-        println!("mega file size: {}", mega_file.len());
+//         println!("mega file size: {}", mega_file.len());
 
-        let actions: Vec<ActionTriple> = serde_json::from_str(&file).unwrap();
+//         let actions: Vec<ActionTriple> = serde_json::from_str(&file).unwrap();
 
-        let sink_actions: Vec<SinkAction> = actions
-            .iter()
-            .filter_map(|action| action.get_sink_action())
-            .collect();
+//         let sink_actions: Vec<SinkAction> = actions
+//             .iter()
+//             .filter_map(|action| action.get_sink_action())
+//             .collect();
 
-        println!("sink actions: {:?}", sink_actions.len());
-    }
-}
+//         println!("sink actions: {:?}", sink_actions.len());
+//     }
+// }

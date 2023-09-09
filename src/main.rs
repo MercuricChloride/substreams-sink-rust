@@ -1,19 +1,21 @@
 use anyhow::{format_err, Context, Error};
 use clap::Parser;
 use futures03::{future::join_all, StreamExt};
+use pb::schema::EntryAdded;
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
 
-use persist::Persist;
 use prost::Message;
+use sink_actions::SqlError;
 use std::io::Read;
-use std::{env, process::exit, sync::Arc};
+use std::{process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
 
 use tokio_postgres::{Client, NoTls};
 
 use crate::pb::schema::EntriesAdded;
+use crate::sink_actions::handle_sink_actions;
 use crate::triples::Action;
 
 pub mod constants;
@@ -104,6 +106,8 @@ async fn main() -> Result<(), Error> {
         46904315,
     );
 
+    let mut failed_queries: Vec<SqlError> = vec![];
+
     loop {
         match stream.next().await {
             None => {
@@ -111,7 +115,7 @@ async fn main() -> Result<(), Error> {
                 break;
             }
             Some(Ok(BlockResponse::New(data))) => {
-                process_block_scoped_data(&data, &client).await?;
+                process_block_scoped_data(&data, &client, &mut failed_queries).await?;
             }
             Some(Ok(BlockResponse::Undo(undo_signal))) => {
                 process_block_undo_signal(&undo_signal)?;
@@ -129,14 +133,11 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-async fn process_block_scoped_data(data: &BlockScopedData, client: &Client) -> Result<(), Error> {
-    // You can decode the actual Any type received using this code:
-    //
-    //     use prost::Message;
-    //     let value = Message::decode::<GeneratedStructName>(data.value.as_slice())?;
-    //
-    // Where GeneratedStructName is the Rust code generated for the Protobuf representing
-    // your type.
+async fn process_block_scoped_data(
+    data: &BlockScopedData,
+    client: &Client,
+    failed_queries: &mut Vec<SqlError>,
+) -> Result<(), Error> {
     if let Some(output) = &data.output {
         if let Some(map_output) = &output.map_output {
             let value = EntriesAdded::decode(map_output.value.as_slice())?;
@@ -151,34 +152,64 @@ async fn process_block_scoped_data(data: &BlockScopedData, client: &Client) -> R
                 data.clock.as_ref().unwrap().number
             );
 
-            let entries_to_fetch: Vec<_> = value
+            let entries_to_handle = value
                 .entries
                 .iter()
-                .map(Action::decode_from_entry)
-                .collect();
-
-            println!("Fetching all ipfs entries...");
-            let entries = join_all(entries_to_fetch).await;
-            println!("Got all ipfs entries!");
-
-            let sink_actions = entries
-                .iter()
-                .filter_map(|action| action.get_sink_actions())
-                .flatten()
+                .map(|entry| handle_entry(&entry, &client))
                 .collect::<Vec<_>>();
 
-            let mut persist: Persist = Persist::open();
+            // wait for all the sink actions to finish
+            let sql_results = join_all(entries_to_handle).await;
 
-            println!("Handling all sink actions...");
-            for sink_action in sink_actions {
-                sink_action
-                    .handle_sink_action(&mut persist)
-                    .expect("Couldn't Handle Sink Action");
-            }
+            // prepare the retry queries futures
+            let retry_queries_futures = failed_queries
+                .iter()
+                .map(|query| query.retry_query(client))
+                .collect::<Vec<_>>();
 
-            println!("Saving all sink actions...");
+            // join all the retry queries futures
+            let retry_queries = join_all(retry_queries_futures)
+                .await
+                .into_iter()
+                .filter_map(|result| match result {
+                    Ok(_) => None,
+                    Err(err) => Some(err),
+                })
+                .collect::<Vec<_>>();
 
-            persist.save(&client).await;
+            // get all of the new query failures
+            let query_failures = sql_results
+                .into_iter()
+                .flatten()
+                .filter_map(|result| {
+                    if let Err(err) = result {
+                        match &err {
+                            SqlError::UnsafeFailure(query) => {
+                                println!("Unsafe query failed {}", query);
+                                Some(err.clone())
+                            }
+                            SqlError::SafeQueryFailure(query) => {
+                                println!("Safe query failed {:?}", query);
+                                None
+                            }
+                            SqlError::BothQueriesFailed(safe_query, unsafe_query) => {
+                                println!(
+                                    "Both queries failed safe: {:?} unsafe:{}",
+                                    safe_query, unsafe_query
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            // reset the failed queries to the new failed queries and the old ones that didn't work again
+            failed_queries.clear();
+            failed_queries.extend(query_failures);
+            failed_queries.extend(retry_queries);
 
             // if the data isn't empty, lets store the cursor
             persist_cursor(&data.cursor, &client).await?;
@@ -186,6 +217,16 @@ async fn process_block_scoped_data(data: &BlockScopedData, client: &Client) -> R
     }
 
     Ok(())
+}
+
+async fn handle_entry(entry: &EntryAdded, client: &Client) -> Vec<Result<(), SqlError>> {
+    let action = Action::decode_from_entry(entry).await;
+    let sink_actions = action.get_sink_actions();
+    if let Some(sink_actions) = sink_actions {
+        handle_sink_actions(sink_actions, client).await
+    } else {
+        vec![]
+    }
 }
 
 fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {
