@@ -1,4 +1,7 @@
-use sea_orm_migration::prelude::*;
+use sea_orm_migration::{
+    prelude::*,
+    sea_orm::{DatabaseBackend, Statement},
+};
 
 #[derive(DeriveMigrationName)]
 pub struct Migration;
@@ -6,6 +9,9 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // create the cursors table
+        let connection: &SchemaManagerConnection = &manager.get_connection();
+
         // create the cursors table
         manager
             .create_table(
@@ -22,6 +28,14 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Cursors::Cursor).text().not_null())
                     .to_owned(),
             )
+            .await?;
+
+        // add a comment to the cursors table
+        connection
+            .execute(Statement::from_string(
+                DatabaseBackend::Postgres,
+                "COMMENT ON TABLE \"public\".\"cursors\" IS E'@name coolCursors';",
+            ))
             .await?;
 
         // create the entity attributes table

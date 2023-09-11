@@ -25,8 +25,8 @@ pub mod spaces {
 
 pub mod entities {
     use entity::{entities::*, entity_attributes};
-    use migration::{DbErr, Expr, OnConflict};
-    use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, Linked};
+    use migration::{DbErr, OnConflict};
+    use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait};
 
     pub async fn create(
         db: &DatabaseConnection,
@@ -44,9 +44,13 @@ pub mod entities {
         Ok(())
     }
 
-    pub async fn upsert_name(db: &DatabaseConnection, name: String) -> Result<(), DbErr> {
+    pub async fn upsert_name(
+        db: &DatabaseConnection,
+        entity_id: String,
+        name: String,
+    ) -> Result<(), DbErr> {
         let entity = ActiveModel {
-            id: ActiveValue::Set(name.to_owned()),
+            id: ActiveValue::Set(entity_id),
             name: ActiveValue::Set(Some(name)),
             ..Default::default()
         };
@@ -135,5 +139,60 @@ pub mod cursor {
         } else {
             Ok(None)
         }
+    }
+}
+
+pub mod triples {
+    use entity::triples::*;
+    use migration::{DbErr, OnConflict};
+    use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait};
+
+    use crate::triples::ValueType;
+
+    pub async fn create(
+        db: &DatabaseConnection,
+        entity_id: String,
+        attribute_id: String,
+        value: ValueType,
+    ) -> Result<(), DbErr> {
+        let triple = ActiveModel {
+            id: ActiveValue::Set(format!("{}-{}-{}", entity_id, attribute_id, value.id())),
+            entity_id: ActiveValue::Set(entity_id),
+            attribute_id: ActiveValue::Set(attribute_id),
+            value: ActiveValue::Set(value.value()),
+            value_id: ActiveValue::Set(value.id().to_string()),
+            value_type: ActiveValue::Set(value.value_type().to_string()),
+        };
+
+        Entity::insert(triple)
+            .on_conflict(
+                OnConflict::column(Column::Id)
+                    .update_column(Column::Value)
+                    .to_owned(),
+            )
+            .exec(db)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn delete(
+        db: &DatabaseConnection,
+        entity_id: String,
+        attribute_id: String,
+        value: ValueType,
+    ) -> Result<(), DbErr> {
+        let triple = ActiveModel {
+            id: ActiveValue::Set(format!("{}-{}-{}", entity_id, attribute_id, value.id())),
+            entity_id: ActiveValue::Set(entity_id),
+            attribute_id: ActiveValue::Set(attribute_id),
+            value: ActiveValue::Set(value.value().to_string()),
+            value_id: ActiveValue::Set(value.id().to_string()),
+            value_type: ActiveValue::Set(value.value_type().to_string()),
+        };
+
+        Entity::delete(triple).exec(db).await?;
+
+        Ok(())
     }
 }

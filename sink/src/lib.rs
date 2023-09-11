@@ -13,7 +13,6 @@ use prost::Message;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_query::OnConflict;
 
-use sink_actions::SqlError;
 use std::io::Read;
 use std::{process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
@@ -223,11 +222,7 @@ async fn process_block_scoped_data(
 async fn handle_entry(entry: &EntryAdded, db: &DatabaseConnection) -> Vec<Result<(), DbErr>> {
     let action = Action::decode_from_entry(entry).await;
     let sink_actions = action.get_sink_actions();
-    if let Some(sink_actions) = sink_actions {
-        handle_sink_actions(sink_actions, db).await
-    } else {
-        vec![]
-    }
+    handle_sink_actions(sink_actions, db).await
 }
 
 fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {

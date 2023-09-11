@@ -64,18 +64,11 @@ impl Action {
     }
 
     /// This function returns a vector of all the sink actions that should be handled in this action.
-    pub fn get_sink_actions(&self) -> Option<Vec<SinkAction>> {
-        let sink_actions = self
-            .actions
+    pub fn get_sink_actions(&self) -> Vec<SinkAction> {
+        self.actions
             .iter()
-            .filter_map(|action| action.get_sink_action())
-            .collect::<Vec<SinkAction>>();
-
-        if sink_actions.is_empty() {
-            None
-        } else {
-            Some(sink_actions)
-        }
+            .flat_map(|action| action.get_sink_actions())
+            .collect::<Vec<SinkAction>>()
     }
 
     pub async fn decode_from_entry(entry: &EntryAdded) -> Self {
@@ -186,7 +179,7 @@ impl<'de> Deserialize<'de> for ActionTriple {
 
 impl ActionTriple {
     /// This method returns a vector of all the sink actions that should be handled in this action triple.
-    pub fn get_sink_action(&self) -> Option<SinkAction> {
+    pub fn get_sink_actions(&self) -> Vec<SinkAction> {
         // all of the possible actions that can be taken in an action triple.
         let actions = vec![
             self.get_type_created(),
@@ -197,8 +190,45 @@ impl ActionTriple {
             self.get_subspace_added(),
         ];
 
+        let default_action = self.get_default_action();
+
         // return the action if any
-        actions.into_iter().flatten().next()
+        if let Some(action) = actions.into_iter().flatten().next() {
+            vec![action, default_action]
+        } else {
+            vec![default_action]
+        }
+    }
+
+    fn get_default_action(&self) -> SinkAction {
+        match &self {
+            ActionTriple::CreateEntity { entity_id, space } => SinkAction::EntityCreated {
+                space: space.to_string(),
+                entity_id: entity_id.to_string(),
+            },
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+            } => SinkAction::TripleAdded {
+                space: space.to_string(),
+                entity_id: entity_id.to_string(),
+                attribute_id: attribute_id.to_string(),
+                value: value.clone(),
+            },
+            ActionTriple::DeleteTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+            } => SinkAction::TripleDeleted {
+                space: space.to_string(),
+                entity_id: entity_id.to_string(),
+                attribute_id: attribute_id.to_string(),
+                value: value.clone(),
+            },
+        }
     }
 
     fn get_type_created(&self) -> Option<SinkAction> {
@@ -404,6 +434,28 @@ impl ValueType {
         }
     }
 
+    pub fn value(&self) -> String {
+        match self {
+            ValueType::Number { value, .. } => value.to_string(),
+            ValueType::String { value, .. } => value.to_string(),
+            ValueType::Image { value, .. } => value.to_string(),
+            ValueType::Entity { id } => id.to_string(),
+            ValueType::Date { value, .. } => value.to_string(),
+            ValueType::Url { value, .. } => value.to_string(),
+        }
+    }
+
+    pub fn value_type(&self) -> &str {
+        match self {
+            ValueType::Number { .. } => "number",
+            ValueType::String { .. } => "string",
+            ValueType::Image { .. } => "image",
+            ValueType::Entity { .. } => "entity",
+            ValueType::Date { .. } => "date",
+            ValueType::Url { .. } => "url",
+        }
+    }
+
     pub fn sql_type(&self) -> &str {
         match self {
             ValueType::Number { .. } => "INTEGER",
@@ -452,12 +504,9 @@ impl<'de> Deserialize<'de> for ValueType {
     }
 }
 
-impl TryInto<SinkAction> for ActionTriple {
-    type Error = String;
-
-    fn try_into(self) -> Result<SinkAction, Self::Error> {
-        self.get_sink_action()
-            .ok_or("No sink action found".to_string())
+impl Into<Vec<SinkAction>> for ActionTriple {
+    fn into(self) -> Vec<SinkAction> {
+        self.get_sink_actions()
     }
 }
 

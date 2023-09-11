@@ -1,7 +1,6 @@
 use futures03::future::join_all;
 use migration::DbErr;
 use sea_orm::DatabaseConnection;
-use tokio_postgres::Client;
 
 use crate::triples::ValueType;
 
@@ -73,6 +72,25 @@ pub enum SinkAction {
         parent_space: String,
         child_space: String,
     },
+
+    /// If we don't have any specific task to take, we will just add the triple to the graph
+    TripleAdded {
+        space: String,
+        entity_id: String,
+        attribute_id: String,
+        value: ValueType,
+    },
+
+    /// If it's an entity creation action, we need to add the entity to the graph
+    EntityCreated { space: String, entity_id: String },
+
+    /// If it's a triple deletion action, we need to remove the entity from the graph
+    TripleDeleted {
+        space: String,
+        entity_id: String,
+        attribute_id: String,
+        value: ValueType,
+    },
 }
 
 pub async fn handle_sink_actions(
@@ -80,88 +98,6 @@ pub async fn handle_sink_actions(
     db: &DatabaseConnection,
 ) -> Vec<Result<(), DbErr>> {
     join_all(sink_actions.into_iter().map(|action| action.execute(db))).await
-}
-
-#[derive(Clone)]
-pub enum SqlError {
-    /// This error happens when a presumed safe query fails
-    SafeQueryFailure(Vec<String>),
-    /// This error happens when an unsafe query fails
-    UnsafeFailure(String),
-    /// This error happens when both queries fail, returns (safe_query, unsafe_query)
-    BothQueriesFailed(Vec<String>, String),
-}
-
-impl SqlError {
-    // pub fn from_queries<T, E>(
-    //     safe_query: Result<T, E>,
-    //     unsafe_query: Option<Result<T, E>>,
-    // ) -> Result<(), Self> {
-    //     if let Some(unsafe_query) = unsafe_query {
-    //         match (safe_query, unsafe_query) {
-    //             (Ok(_), Ok(_)) => Ok(()),
-    //             (Err(_), Ok(_)) => Err(SqlError::SafeQueryFailure("".to_string())),
-    //             (Ok(_), Err(_)) => Err(SqlError::UnsafeFailure("".to_string())),
-    //             (Err(_), Err(_)) => {
-    //                 Err(SqlError::BothQueriesFailed("".to_string(), "".to_string()))
-    //             }
-    //         }
-    //     } else {
-    //         match safe_query {
-    //             Ok(_) => Ok(()),
-    //             Err(_) => Err(SqlError::SafeQueryFailure("".to_string())),
-    //         }
-    //     }
-    // }
-
-    pub async fn retry_query(&self, client: &Client) -> Result<(), Self> {
-        match self {
-            SqlError::UnsafeFailure(query) => {
-                let unsafe_execute = client.execute(query, &[]).await;
-                if let Err(_) = unsafe_execute {
-                    Err(SqlError::UnsafeFailure(query.clone()))
-                } else {
-                    Ok(())
-                }
-            }
-
-            SqlError::SafeQueryFailure(queries) => {
-                let mut failures = vec![];
-                for query in queries {
-                    let safe_execute = client.execute(query, &[]).await;
-                    if let Err(_) = safe_execute {
-                        failures.push(query.clone());
-                    }
-                }
-
-                if failures.is_empty() {
-                    Ok(())
-                } else {
-                    Err(SqlError::SafeQueryFailure(failures))
-                }
-            }
-
-            SqlError::BothQueriesFailed(safe_queries, unsafe_query) => {
-                let mut failures = vec![];
-                for query in safe_queries {
-                    let safe_execute = client.execute(query, &[]).await;
-                    if let Err(_) = safe_execute {
-                        failures.push(query.clone());
-                    }
-                }
-
-                let unsafe_execute = client.execute(unsafe_query, &[]).await;
-                match (failures.is_empty(), unsafe_execute) {
-                    (true, Ok(_)) => Ok(()),
-                    (false, Ok(_)) => Err(SqlError::SafeQueryFailure(failures)),
-                    (true, Err(_)) => Err(SqlError::UnsafeFailure(unsafe_query.clone())),
-                    (false, Err(_)) => {
-                        Err(SqlError::BothQueriesFailed(failures, unsafe_query.clone()))
-                    }
-                }
-            }
-        }
-    }
 }
 
 impl SinkAction {
@@ -180,159 +116,47 @@ impl SinkAction {
                 entity_id,
                 attribute_id,
                 value,
-            } => Ok(()),
+            } => entities::add_attribute(db, entity_id, value.id().to_string()).await,
             SinkAction::NameAdded {
                 space,
                 entity_id,
                 name,
-            } => Ok(()),
+            } => entities::upsert_name(db, entity_id, name).await,
+
             SinkAction::ValueTypeAdded {
                 space,
                 entity_id,
                 attribute_id,
                 value_type,
             } => Ok(()),
+
             SinkAction::SubspaceAdded {
                 parent_space,
                 child_space,
             } => Ok(()),
+
             SinkAction::SubspaceRemoved {
                 parent_space,
                 child_space,
             } => Ok(()),
-        }
-    }
-    // pub async fn execute(&self, client: &Client) -> Result<(), SqlError> {
-    //     let (safe_queries, unsafe_query) = &self.queries();
 
-    //     for query in safe_queries {
-    //         let safe_execute = client.execute(query, &[]).await;
-    //         if let Err(err) = safe_execute {
-    //             panic!("Safe query failed: {} with err: {:?}", query, err);
-    //         }
-    //     }
-
-    //     if let Some(unsafe_query) = unsafe_query {
-    //         let unsafe_execute = client.execute(unsafe_query, &[]).await;
-    //         if let Err(err) = unsafe_execute {
-    //             panic!(
-    //                 "Unsafe query failed: {:?} with err: {:?}",
-    //                 unsafe_query, err
-    //             );
-    //         }
-    //         Ok(())
-    //     } else {
-    //         Ok(())
-    //     }
-    // }
-
-    /// This function returns a tuple containing (SafeQuery, Option<UnsafeQuery>)
-    fn queries(&self) -> (Vec<String>, Option<String>) {
-        (self.get_query(), self.get_unsafe_query())
-    }
-
-    /// This function returns the SQL query we will always execute for this action.
-    ///
-    /// It is important to also try and grab the unsafe query that might fail, use the `get_unsafe_query` function for that
-    fn get_query(&self) -> Vec<String> {
-        match self {
-            SinkAction::SpaceCreated { entity_id, space } => {
-                vec![format!("INSERT INTO spaces (id, space) VALUES ('{entity_id}', '{space}')")]
-            }
-
-            SinkAction::TypeCreated { entity_id, space } => {
-                vec![
-                format!("
-INSERT INTO entity_types (id, space) VALUES ('{entity_id}', '{space}');
-"),
-format!("CREATE TABLE \"{entity_id}\" (id TEXT);")
-                    ]
-            }
-
-            SinkAction::AttributeAdded {
-                entity_id, value, ..
-            } => {
-                let belongs_to = value.id();
-                vec![
-                    format!(
-                        "INSERT INTO \"entity_attributes\" (id, belongs_to) VALUES ('{entity_id}', '{belongs_to}')"
-                    )
-                ]
-            }
-
-            SinkAction::NameAdded {
+            SinkAction::TripleAdded {
                 space,
                 entity_id,
-                name,
-            } => {
-                let name = name.replace("'", "''");
-                vec![
-                format!("
-INSERT INTO entity_names (id, name, space)
-VALUES ('{entity_id}', '{name}', '{space}')
-ON CONFLICT (id)
-DO UPDATE SET
-name = '{name}', space = '{space}'
-                ")
-                ]
-            }
+                attribute_id,
+                value,
+            } => triples::create(db, entity_id, attribute_id, value).await,
 
-            SinkAction::ValueTypeAdded {
+            SinkAction::TripleDeleted {
                 space,
                 entity_id,
-                value_type,
-                ..
-            } => {
-                let value_type = value_type.sql_type();
-                vec![
-                format!("
-INSERT INTO \"entity_value_types\" (id, value_type, space)
-VALUES ('{entity_id}', '{value_type}', '{space}')
-ON CONFLICT (id)
-DO UPDATE SET
-value_type = '{value_type}', space = '{space}';
-                ")
-                ]
-            }
+                attribute_id,
+                value,
+            } => triples::delete(db, entity_id, attribute_id, value).await,
 
-            SinkAction::SubspaceAdded {
-                parent_space,
-                child_space,
-            } => vec![format!("INSERT INTO \"subspaces\" (id, subspace_of) VALUES ('{child_space}', '{parent_space}')")],
-
-            SinkAction::SubspaceRemoved { parent_space, child_space } => {
-                vec![format!("DELETE FROM \"subspaces\" WHERE id = '{child_space}' AND subspace_of = '{parent_space}'")]
+            SinkAction::EntityCreated { space, entity_id } => {
+                entities::create(db, entity_id, space).await
             }
-        }
-    }
-
-    /// This function returns the SQL query that might fail for this action.
-    /// If there is no query that might fail, this function returns `None`
-    fn get_unsafe_query(&self) -> Option<String> {
-        match self {
-            SinkAction::AttributeAdded {
-                value, entity_id, ..
-            } => {
-                let value_id = value.id();
-                let value_type = value.sql_type();
-                Some(format!(
-                    "
-ALTER TABLE \"{entity_id}\" ADD COLUMN \"{value_id}\" {value_type};
-"
-                ))
-            }
-            SinkAction::TypeCreated { entity_id, .. } => Some(format!(
-                "
-DO $$
-DECLARE
-    entity_name TEXT;
-BEGIN
-    SELECT name INTO entity_name FROM entity_names WHERE id = '{entity_id}';
-    EXECUTE 'COMMENT ON TABLE \"{entity_id}\" IS E''@name ' || entity_name || '''';
-END $$;
-"
-            )),
-            _ => None,
         }
     }
 }
