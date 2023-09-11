@@ -1,7 +1,11 @@
 use futures03::future::join_all;
+use migration::DbErr;
+use sea_orm::DatabaseConnection;
 use tokio_postgres::Client;
 
 use crate::triples::ValueType;
+
+use crate::models::*;
 
 #[derive(Debug)]
 /// This enum represents different actions that the sink should handle. Actions being specific changes to the graph.
@@ -73,9 +77,9 @@ pub enum SinkAction {
 
 pub async fn handle_sink_actions(
     sink_actions: Vec<SinkAction>,
-    client: &Client,
-) -> Vec<Result<(), SqlError>> {
-    join_all(sink_actions.iter().map(|action| action.execute(&client))).await
+    db: &DatabaseConnection,
+) -> Vec<Result<(), DbErr>> {
+    join_all(sink_actions.into_iter().map(|action| action.execute(db))).await
 }
 
 #[derive(Clone)]
@@ -161,42 +165,66 @@ impl SqlError {
 }
 
 impl SinkAction {
-    pub async fn execute(&self, client: &Client) -> Result<(), SqlError> {
-        let (safe_queries, unsafe_query) = &self.queries();
+    pub async fn execute(self, db: &DatabaseConnection) -> Result<(), DbErr> {
+        match self {
+            SinkAction::SpaceCreated { entity_id, space } => {
+                entities::create(db, entity_id.clone(), space.clone()).await?;
 
-        for query in safe_queries {
-            let safe_execute = client.execute(query, &[]).await;
-            if let Err(err) = safe_execute {
-                panic!("Safe query failed: {} with err: {:?}", query, err);
+                spaces::create(db, entity_id, space).await
             }
-        }
-
-        if let Some(unsafe_query) = unsafe_query {
-            let unsafe_execute = client.execute(unsafe_query, &[]).await;
-            if let Err(err) = unsafe_execute {
-                panic!(
-                    "Unsafe query failed: {:?} with err: {:?}",
-                    unsafe_query, err
-                );
+            SinkAction::TypeCreated { entity_id, space } => {
+                entities::upsert_is_type(db, entity_id, true).await
             }
-            Ok(())
-            // match (safe_execute, unsafe_execute) {
-            //     (Ok(_), Ok(_)) => Ok(()),
-            //     (Err(_), Ok(_)) => Err(SqlError::SafeQueryFailure(query.clone())),
-            //     (Ok(_), Err(_)) => Err(SqlError::UnsafeFailure(unsafe_query.clone())),
-            //     (Err(_), Err(_)) => Err(SqlError::BothQueriesFailed(
-            //         query.clone(),
-            //         unsafe_query.clone(),
-            //     )),
-            // }
-        } else {
-            Ok(())
-            // match safe_execute {
-            //     Ok(_) => Ok(()),
-            //     Err(_) => Err(SqlError::SafeQueryFailure(query.clone())),
-            // }
+            SinkAction::AttributeAdded {
+                space,
+                entity_id,
+                attribute_id,
+                value,
+            } => Ok(()),
+            SinkAction::NameAdded {
+                space,
+                entity_id,
+                name,
+            } => Ok(()),
+            SinkAction::ValueTypeAdded {
+                space,
+                entity_id,
+                attribute_id,
+                value_type,
+            } => Ok(()),
+            SinkAction::SubspaceAdded {
+                parent_space,
+                child_space,
+            } => Ok(()),
+            SinkAction::SubspaceRemoved {
+                parent_space,
+                child_space,
+            } => Ok(()),
         }
     }
+    // pub async fn execute(&self, client: &Client) -> Result<(), SqlError> {
+    //     let (safe_queries, unsafe_query) = &self.queries();
+
+    //     for query in safe_queries {
+    //         let safe_execute = client.execute(query, &[]).await;
+    //         if let Err(err) = safe_execute {
+    //             panic!("Safe query failed: {} with err: {:?}", query, err);
+    //         }
+    //     }
+
+    //     if let Some(unsafe_query) = unsafe_query {
+    //         let unsafe_execute = client.execute(unsafe_query, &[]).await;
+    //         if let Err(err) = unsafe_execute {
+    //             panic!(
+    //                 "Unsafe query failed: {:?} with err: {:?}",
+    //                 unsafe_query, err
+    //             );
+    //         }
+    //         Ok(())
+    //     } else {
+    //         Ok(())
+    //     }
+    // }
 
     /// This function returns a tuple containing (SafeQuery, Option<UnsafeQuery>)
     fn queries(&self) -> (Vec<String>, Option<String>) {
