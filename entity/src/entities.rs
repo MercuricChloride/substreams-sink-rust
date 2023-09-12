@@ -9,7 +9,7 @@ pub struct Model {
     pub id: String,
     pub name: Option<String>,
     pub is_type: Option<bool>,
-    #[sea_orm(column_type = "Text", nullable)]
+    #[sea_orm(column_type = "Text")]
     pub defined_in: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub value_type: Option<String>,

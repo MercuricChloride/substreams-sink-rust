@@ -64,9 +64,9 @@ impl Action {
     }
 
     /// This function returns a vector of all the sink actions that should be handled in this action.
-    pub fn get_sink_actions(&self) -> Vec<SinkAction> {
+    pub fn get_sink_actions(self) -> Vec<SinkAction> {
         self.actions
-            .iter()
+            .into_iter()
             .flat_map(|action| action.get_sink_actions())
             .collect::<Vec<SinkAction>>()
     }
@@ -77,8 +77,8 @@ impl Action {
             uri if uri.starts_with("data:application/json;base64,") => {
                 let data = uri.split("base64,").last().unwrap();
                 let decoded = general_purpose::URL_SAFE.decode(data.as_bytes()).unwrap();
-                let space = entry.space.clone();
-                Action::decode_with_space(&decoded, &space)
+                let space = &entry.space;
+                Action::decode_with_space(&decoded, space)
             }
             uri if uri.starts_with("ipfs://") => {
                 let cid = uri.trim_start_matches("ipfs://");
@@ -88,8 +88,8 @@ impl Action {
                 let path = format!("./ipfs-data/{}.json", cid);
 
                 if let Ok(data) = std::fs::read_to_string(&path) {
-                    let space = entry.space.clone();
-                    return Action::decode_with_space(data.as_bytes(), &space);
+                    let space = &entry.space;
+                    return Action::decode_with_space(data.as_bytes(), space);
                 } else {
                     let mut attempts: i32 = 0;
                     let data;
@@ -109,12 +109,12 @@ impl Action {
                             }
                         }
                     }
-                    let space = entry.space.clone();
+                    let space = &entry.space;
 
                     // cache the file locally
                     std::fs::write(&path, &data).unwrap();
 
-                    Action::decode_with_space(&data.as_bytes(), &space)
+                    Action::decode_with_space(&data.as_bytes(), space)
                 }
             }
             _ => panic!("Invalid URI"), //TODO Handle this gracefully
@@ -179,7 +179,7 @@ impl<'de> Deserialize<'de> for ActionTriple {
 
 impl ActionTriple {
     /// This method returns a vector of all the sink actions that should be handled in this action triple.
-    pub fn get_sink_actions(&self) -> Vec<SinkAction> {
+    pub fn get_sink_actions(self) -> Vec<SinkAction> {
         // all of the possible actions that can be taken in an action triple.
         let actions = vec![
             self.get_type_created(),
@@ -192,30 +192,29 @@ impl ActionTriple {
 
         let default_action = self.get_default_action();
 
-        // return the action if any
+        // if there are any actions, return them, otherwise return the default action.
         if let Some(action) = actions.into_iter().flatten().next() {
-            vec![action, default_action]
+            vec![default_action, action]
         } else {
             vec![default_action]
         }
     }
 
-    fn get_default_action(&self) -> SinkAction {
-        match &self {
-            ActionTriple::CreateEntity { entity_id, space } => SinkAction::EntityCreated {
-                space: space.to_string(),
-                entity_id: entity_id.to_string(),
-            },
+    fn get_default_action(self) -> SinkAction {
+        match self {
+            ActionTriple::CreateEntity { entity_id, space } => {
+                SinkAction::EntityCreated { space, entity_id }
+            }
             ActionTriple::CreateTriple {
                 entity_id,
                 attribute_id,
                 value,
                 space,
             } => SinkAction::TripleAdded {
-                space: space.to_string(),
-                entity_id: entity_id.to_string(),
-                attribute_id: attribute_id.to_string(),
-                value: value.clone(),
+                space,
+                entity_id,
+                attribute_id,
+                value,
             },
             ActionTriple::DeleteTriple {
                 entity_id,
@@ -223,10 +222,10 @@ impl ActionTriple {
                 value,
                 space,
             } => SinkAction::TripleDeleted {
-                space: space.to_string(),
-                entity_id: entity_id.to_string(),
-                attribute_id: attribute_id.to_string(),
-                value: value.clone(),
+                space,
+                entity_id,
+                attribute_id,
+                value,
             },
         }
     }

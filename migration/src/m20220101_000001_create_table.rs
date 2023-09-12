@@ -74,7 +74,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Entities::Name).string())
                     .col(ColumnDef::new(Entities::IsType).boolean().default(false))
-                    .col(ColumnDef::new(Entities::DefinedIn).text())
+                    .col(ColumnDef::new(Entities::DefinedIn).text().not_null())
                     .col(ColumnDef::new(Entities::ValueType).text())
                     .to_owned(),
             )
@@ -109,6 +109,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Triples::ValueId).text().not_null())
                     .col(ColumnDef::new(Triples::ValueType).text().not_null())
                     .col(ColumnDef::new(Triples::Value).text().not_null())
+                    .col(ColumnDef::new(Triples::DefinedIn).text().not_null())
                     .to_owned(),
             )
             .await?;
@@ -182,4 +183,5 @@ enum Triples {
     ValueId,
     ValueType,
     Value,
+    DefinedIn,
 }

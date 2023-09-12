@@ -111,7 +111,6 @@ pub async fn main() -> Result<(), Error> {
                 break;
             }
             Some(Ok(BlockResponse::New(data))) => {
-                cursor::store(&db, data.cursor.clone()).await?;
                 process_block_scoped_data(data, &db).await?;
             }
             Some(Ok(BlockResponse::Undo(undo_signal))) => {
@@ -141,6 +140,7 @@ async fn process_block_scoped_data(
 
             if value.entries.len() == 0 {
                 println!("Empty Block #{}:", data.clock.as_ref().unwrap().number);
+                cursor::store(db, data.cursor);
                 return Ok(());
             }
 
@@ -157,61 +157,6 @@ async fn process_block_scoped_data(
 
             join_all(entries_to_handle).await;
 
-            // // wait for all the sink actions to finish
-            // let sql_results = join_all(entries_to_handle).await;
-
-            // // prepare the retry queries futures
-            // let retry_queries_futures = failed_queries
-            //     .iter()
-            //     .map(|query| query.retry_query(client))
-            //     .collect::<Vec<_>>();
-
-            // // join all the retry queries futures
-            // let retry_queries = join_all(retry_queries_futures)
-            //     .await
-            //     .into_iter()
-            //     .filter_map(|result| match result {
-            //         Ok(_) => None,
-            //         Err(err) => Some(err),
-            //     })
-            //     .collect::<Vec<_>>();
-
-            // // get all of the new query failures
-            // let query_failures = sql_results
-            //     .into_iter()
-            //     .flatten()
-            //     .filter_map(|result| {
-            //         if let Err(err) = result {
-            //             match &err {
-            //                 SqlError::UnsafeFailure(query) => {
-            //                     println!("Unsafe query failed {}", query);
-            //                     Some(err.clone())
-            //                 }
-            //                 SqlError::SafeQueryFailure(query) => {
-            //                     println!("Safe query failed {:?}", query);
-            //                     None
-            //                 }
-            //                 SqlError::BothQueriesFailed(safe_query, unsafe_query) => {
-            //                     println!(
-            //                         "Both queries failed safe: {:?} unsafe:{}",
-            //                         safe_query, unsafe_query
-            //                     );
-            //                     None
-            //                 }
-            //             }
-            //         } else {
-            //             None
-            //         }
-            //     })
-            //     .collect::<Vec<_>>();
-
-            // // reset the failed queries to the new failed queries and the old ones that didn't work again
-            // failed_queries.clear();
-            // failed_queries.extend(query_failures);
-            // failed_queries.extend(retry_queries);
-
-            // // if the data isn't empty, lets store the cursor
-            // persist_cursor(&data.cursor, &client).await?;
             cursor::store(db, data.cursor);
         }
     }
@@ -233,30 +178,6 @@ fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyho
     // simple way is to do `delete all records where block_num > 5` which is the block num
     // received in the `BlockUndoSignal` (this is true for append only records, so when only `INSERT` are allowed).
     unimplemented!("you must implement some kind of block undo handling, or request only final blocks (tweak substreams_stream.rs)")
-}
-
-async fn persist_cursor(_cursor: &String, client: &Client) -> Result<(), anyhow::Error> {
-    let rows_changed = client
-        .execute("UPDATE cursors set cursor = $1 where id = 0", &[_cursor])
-        .await?;
-
-    println!("updated {} rows", rows_changed);
-
-    Ok(())
-}
-
-async fn load_persisted_cursor(client: &Client) -> Result<Option<String>, anyhow::Error> {
-    let row = client
-        .query_one("SELECT cursor FROM cursors WHERE id=0", &[])
-        .await?;
-    let cursor: &str = row.get("cursor");
-
-    println!("Found cursor: {}", cursor);
-
-    match cursor {
-        s if s.starts_with("") => Ok(None),
-        _ => Ok(Some(cursor.to_string())),
-    }
 }
 
 async fn read_package(input: &str) -> Result<Package, anyhow::Error> {

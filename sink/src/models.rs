@@ -34,7 +34,7 @@ pub mod entities {
         space: String,
     ) -> Result<(), DbErr> {
         let entity = ActiveModel {
-            id: ActiveValue::Set(entity_id.to_owned()),
+            id: ActiveValue::Set(entity_id),
             defined_in: ActiveValue::Set(Some(space)),
             ..Default::default()
         };
@@ -154,6 +154,7 @@ pub mod triples {
         entity_id: String,
         attribute_id: String,
         value: ValueType,
+        space: String,
     ) -> Result<(), DbErr> {
         let triple = ActiveModel {
             id: ActiveValue::Set(format!("{}-{}-{}", entity_id, attribute_id, value.id())),
@@ -162,6 +163,7 @@ pub mod triples {
             value: ActiveValue::Set(value.value()),
             value_id: ActiveValue::Set(value.id().to_string()),
             value_type: ActiveValue::Set(value.value_type().to_string()),
+            defined_in: ActiveValue::Set(space),
         };
 
         Entity::insert(triple)
@@ -181,6 +183,7 @@ pub mod triples {
         entity_id: String,
         attribute_id: String,
         value: ValueType,
+        space: String,
     ) -> Result<(), DbErr> {
         let triple = ActiveModel {
             id: ActiveValue::Set(format!("{}-{}-{}", entity_id, attribute_id, value.id())),
@@ -189,6 +192,7 @@ pub mod triples {
             value: ActiveValue::Set(value.value().to_string()),
             value_id: ActiveValue::Set(value.id().to_string()),
             value_type: ActiveValue::Set(value.value_type().to_string()),
+            defined_in: ActiveValue::Set(space),
         };
 
         Entity::delete(triple).exec(db).await?;
