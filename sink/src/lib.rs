@@ -7,13 +7,14 @@ use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
 
 use entity::*;
-use sea_orm::ActiveValue;
+use sea_orm::{ActiveValue, ConnectOptions};
 
 use prost::Message;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_query::OnConflict;
 
 use std::io::Read;
+use std::time::Duration;
 use std::{process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
@@ -89,8 +90,11 @@ pub async fn main() -> Result<(), Error> {
     let package = read_package(&package_file).await?;
     let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, Some(token)).await?);
 
-    let db: DatabaseConnection =
-        Database::connect(format!("postgres://{username}:{password}@{host}/postgres")).await?;
+    let mut opt = ConnectOptions::new(format!("postgres://{username}:{password}@{host}/postgres"));
+    opt.max_lifetime(Duration::from_secs(300))
+        .connect_timeout(Duration::from_secs(300));
+
+    let db: DatabaseConnection = Database::connect(opt).await?;
 
     let cursor: Option<String> = cursor::get(&db).await?;
 
@@ -131,8 +135,6 @@ pub async fn main() -> Result<(), Error> {
 async fn process_block_scoped_data(
     data: BlockScopedData,
     db: &DatabaseConnection,
-    //client: &Client,
-    //failed_queries: &mut Vec<SqlError>,
 ) -> Result<(), Error> {
     if let Some(output) = &data.output {
         if let Some(map_output) = &output.map_output {
@@ -155,9 +157,19 @@ async fn process_block_scoped_data(
                 .map(|entry| handle_entry(&entry, db))
                 .collect::<Vec<_>>();
 
-            join_all(entries_to_handle).await;
+            let results = join_all(entries_to_handle)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<Result<(), _>>>();
 
-            cursor::store(db, data.cursor);
+            for result in results {
+                if let Err(err) = result {
+                    panic!("{}", err)
+                }
+            }
+
+            cursor::store(db, data.cursor).await?;
         }
     }
 

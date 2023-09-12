@@ -35,13 +35,30 @@ pub mod entities {
     ) -> Result<(), DbErr> {
         let entity = ActiveModel {
             id: ActiveValue::Set(entity_id),
-            defined_in: ActiveValue::Set(Some(space)),
+            defined_in: ActiveValue::Set(space),
             ..Default::default()
         };
 
-        Entity::insert(entity).exec(db).await?;
+        Entity::insert(entity)
+            .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
+            .do_nothing()
+            .exec(db)
+            .await;
 
         Ok(())
+    }
+
+    pub async fn create_or_nothing(
+        db: &DatabaseConnection,
+        entity_id: String,
+        space: String,
+    ) -> Result<(), DbErr> {
+        let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
+
+        match entity {
+            Some(_) => Ok(()),
+            None => create(db, entity_id, space).await,
+        }
     }
 
     pub async fn upsert_name(
@@ -145,7 +162,7 @@ pub mod cursor {
 pub mod triples {
     use entity::triples::*;
     use migration::{DbErr, OnConflict};
-    use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait};
+    use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, InsertResult};
 
     use crate::triples::ValueType;
 
@@ -156,6 +173,9 @@ pub mod triples {
         value: ValueType,
         space: String,
     ) -> Result<(), DbErr> {
+        super::entities::create(db, entity_id.clone(), space.clone()).await?;
+        super::entities::create(db, attribute_id.clone(), space.clone()).await?;
+
         let triple = ActiveModel {
             id: ActiveValue::Set(format!("{}-{}-{}", entity_id, attribute_id, value.id())),
             entity_id: ActiveValue::Set(entity_id),
@@ -167,11 +187,8 @@ pub mod triples {
         };
 
         Entity::insert(triple)
-            .on_conflict(
-                OnConflict::column(Column::Id)
-                    .update_column(Column::Value)
-                    .to_owned(),
-            )
+            .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
+            .do_nothing()
             .exec(db)
             .await?;
 
