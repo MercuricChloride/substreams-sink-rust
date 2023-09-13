@@ -74,7 +74,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Entities::Name).string())
                     .col(ColumnDef::new(Entities::IsType).boolean().default(false))
-                    .col(ColumnDef::new(Entities::DefinedIn).text().not_null())
+                    .col(ColumnDef::new(Entities::DefinedIn).text())
                     .col(ColumnDef::new(Entities::ValueType).text())
                     .to_owned(),
             )

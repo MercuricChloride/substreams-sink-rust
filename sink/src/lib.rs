@@ -1,25 +1,42 @@
 use anyhow::{format_err, Context, Error};
 use clap::Parser;
+use crossterm::event::{Event, KeyCode, KeyEventKind};
 use futures03::{future::join_all, StreamExt};
+use gui::{ui, GuiData, StatefulList};
 use migration::DbErr;
 use pb::schema::EntryAdded;
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
 
 use entity::*;
-use sea_orm::{ActiveValue, ConnectOptions};
+use sea_orm::{ActiveValue, ConnectOptions, DatabaseTransaction, TransactionTrait};
 
 use prost::Message;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_query::OnConflict;
+use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::RwLock;
+use tokio::time::Instant;
+use tokio::{join, try_join};
 
-use std::io::Read;
+use std::io::{Read, Stdout};
 use std::time::Duration;
 use std::{process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
 
-use tokio_postgres::{Client, NoTls};
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+
+use ratatui::{
+    backend::CrosstermBackend,
+    widgets::{Block, Borders},
+    Terminal,
+};
+use std::{io, thread};
 
 use crate::pb::schema::EntriesAdded;
 use crate::sink_actions::handle_sink_actions;
@@ -28,6 +45,7 @@ use crate::triples::Action;
 use models::cursor;
 
 pub mod constants;
+pub mod gui;
 pub mod models;
 mod pb;
 mod persist;
@@ -87,12 +105,24 @@ pub async fn main() -> Result<(), Error> {
         port,
     } = Args::parse();
 
+    let start_block = 0;
+    let stop_block = 46904315;
+
+    let gui_data_lock = Arc::new(RwLock::new(GuiData {
+        start_block,
+        stop_block,
+        block_number: 0,
+        information_in_block: false,
+        tasks: StatefulList::with_items(vec!["Test Item".to_string(), "Another Item".to_string()]),
+    }));
+
     let package = read_package(&package_file).await?;
     let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, Some(token)).await?);
 
     let mut opt = ConnectOptions::new(format!("postgres://{username}:{password}@{host}/postgres"));
-    opt.max_lifetime(Duration::from_secs(300))
-        .connect_timeout(Duration::from_secs(300));
+    opt.max_lifetime(Duration::from_secs(1000))
+        .max_connections(70)
+        .connect_timeout(Duration::from_secs(1000));
 
     let db: DatabaseConnection = Database::connect(opt).await?;
 
@@ -108,25 +138,79 @@ pub async fn main() -> Result<(), Error> {
         46904315,
     );
 
-    loop {
-        match stream.next().await {
-            None => {
-                println!("Stream consumed");
-                break;
-            }
-            Some(Ok(BlockResponse::New(data))) => {
-                process_block_scoped_data(data, &db).await?;
-            }
-            Some(Ok(BlockResponse::Undo(undo_signal))) => {
-                process_block_undo_signal(&undo_signal)?;
-            }
-            Some(Err(err)) => {
-                println!();
-                println!("Stream terminated with error");
-                println!("{:?}", err);
-                exit(1);
+    let gui_task_clone = gui_data_lock.clone();
+    let terminal_task = tokio::task::spawn(async move {
+        let mut terminal = setup_terminal().unwrap();
+        run(&mut terminal, gui_task_clone).await;
+        restore_terminal(&mut terminal);
+    });
+
+    let task_clone = gui_data_lock.clone();
+
+    let stream_task = tokio::task::spawn(async move {
+        let stream_task_clone = task_clone.clone();
+        loop {
+            let stream_task_clone = stream_task_clone.clone();
+            match stream.next().await {
+                None => {
+                    println!("Stream consumed");
+                    break;
+                }
+                Some(Ok(BlockResponse::New(data))) => {
+                    process_block_scoped_data(data, &db, stream_task_clone).await;
+                }
+                Some(Ok(BlockResponse::Undo(undo_signal))) => {
+                    process_block_undo_signal(&undo_signal).unwrap();
+                }
+                Some(Err(err)) => {
+                    println!();
+                    println!("Stream terminated with error");
+                    println!("{:?}", err);
+                    exit(1);
+                }
             }
         }
+    });
+
+    let _ = join!(stream_task, terminal_task);
+
+    Ok(())
+}
+
+fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Error> {
+    let mut stdout = io::stdout();
+    //enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen)?;
+    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+}
+
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Error> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen,)?;
+    Ok(terminal.show_cursor()?)
+}
+
+async fn run(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    gui_data_lock: Arc<RwLock<GuiData>>,
+) -> Result<(), Error> {
+    let mut render_count = 0;
+    loop {
+        render_count += 1;
+
+        let gui_data = gui_data_lock.read().await;
+        terminal.draw(|frame| {
+            ui(frame, &gui_data, render_count);
+        });
+        drop(gui_data);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // if event::poll(Duration::from_millis(0))? {
+        //     if let Event::Key(key) = event::read()? {
+        //         if KeyCode::Char('q') == key.code {
+        //             break;
+        //         }
+        //     }
+        // }
     }
 
     Ok(())
@@ -135,51 +219,72 @@ pub async fn main() -> Result<(), Error> {
 async fn process_block_scoped_data(
     data: BlockScopedData,
     db: &DatabaseConnection,
+    gui_data_lock: Arc<RwLock<GuiData>>,
 ) -> Result<(), Error> {
     if let Some(output) = &data.output {
         if let Some(map_output) = &output.map_output {
             let value = EntriesAdded::decode(map_output.value.as_slice())?;
+            let mut gui_data = gui_data_lock.write().await;
+
+            gui_data.block_number = data.clock.as_ref().unwrap().number;
 
             if value.entries.len() == 0 {
-                println!("Empty Block #{}:", data.clock.as_ref().unwrap().number);
+                // println!("Empty Block #{}:", data.clock.as_ref().unwrap().number);
                 cursor::store(db, data.cursor);
+                gui_data.information_in_block = false;
                 return Ok(());
             }
+            gui_data.information_in_block = true;
+            drop(gui_data);
 
-            println!(
-                "Block with some data #{}:",
-                data.clock.as_ref().unwrap().number
-            );
+            let (tx, mut rx) = tokio::sync::mpsc::channel(500_000);
 
-            let entries_to_handle = value
-                .entries
-                .iter()
-                .map(|entry| handle_entry(&entry, db))
-                .collect::<Vec<_>>();
+            let db = db.clone();
+            let results = tokio::task::spawn(async move {
+                let entries_to_handle = value
+                    .entries
+                    .iter()
+                    .map(|entry| handle_entry(&entry, &db, &tx))
+                    .collect::<Vec<_>>();
 
-            let results = join_all(entries_to_handle)
-                .await
-                .into_iter()
-                .flatten()
-                .collect::<Vec<Result<(), _>>>();
+                let results = join_all(entries_to_handle)
+                    .await
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<Result<(), _>>>();
 
-            for result in results {
-                if let Err(err) = result {
-                    panic!("{}", err)
-                }
+                cursor::store(&db, data.cursor).await;
+
+                results
+            });
+
+            while let Some(response) = rx.recv().await {
+                let mut gui_data = gui_data_lock.write().await;
+                gui_data.tasks.items.push(response);
+                drop(gui_data)
             }
 
-            cursor::store(db, data.cursor).await?;
+            let results = try_join!(results);
+
+            for result in results.unwrap().0 {
+                if let Err(err) = result {
+                    return Err(err.into());
+                }
+            }
         }
     }
 
     Ok(())
 }
 
-async fn handle_entry(entry: &EntryAdded, db: &DatabaseConnection) -> Vec<Result<(), DbErr>> {
+async fn handle_entry(
+    entry: &EntryAdded,
+    db: &DatabaseConnection,
+    sender: &Sender<String>,
+) -> Vec<Result<(), DbErr>> {
     let action = Action::decode_from_entry(entry).await;
     let sink_actions = action.get_sink_actions();
-    handle_sink_actions(sink_actions, db).await
+    handle_sink_actions(sink_actions, db, sender).await
 }
 
 fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {

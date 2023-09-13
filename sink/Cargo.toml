@@ -27,3 +27,13 @@ sea-orm = { version = "0.12", features = [ "sqlx-postgres", "runtime-tokio-nativ
 entity = { path="../entity" }
 migration = { path="../migration" }
 sea-query = "0"
+crossterm = "0.27"
+ratatui = "0.23"
+
+[dependencies.uuid]
+version = "1.4.1"
+features = [
+    "v4",                # Lets you generate random UUIDs
+    "fast-rng",          # Use a faster (but still sufficiently random) RNG
+    "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
+]
