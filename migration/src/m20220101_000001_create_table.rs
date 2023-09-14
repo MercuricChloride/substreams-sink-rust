@@ -3,6 +3,20 @@ use sea_orm_migration::{
     sea_orm::{DatabaseBackend, Statement},
 };
 
+macro_rules! drop_table {
+    ($manager:ident, $table:ident) => {
+        $manager
+            .drop_table(Table::drop().table($table::Table).to_owned())
+            .await?;
+    };
+}
+
+macro_rules! drop_tables {
+    ($manager:ident, $($table:ident),+) => {
+        $(drop_table!($manager, $table);)+
+    };
+}
+
 #[derive(DeriveMigrationName)]
 pub struct Migration;
 
@@ -38,6 +52,45 @@ impl MigrationTrait for Migration {
             ))
             .await?;
 
+        // create the Accounts table
+        manager
+            .create_table(
+                Table::create()
+                    .table(Accounts::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Accounts::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // create the LogEntries table
+        manager
+            .create_table(
+                Table::create()
+                    .table(LogEntries::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(LogEntries::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(LogEntries::CreatedAtBlock).timestamp())
+                    .col(ColumnDef::new(LogEntries::Uri).text())
+                    .col(ColumnDef::new(LogEntries::CreatedBy).text())
+                    .col(ColumnDef::new(LogEntries::Space).text())
+                    .col(ColumnDef::new(LogEntries::MimeType).text())
+                    .col(ColumnDef::new(LogEntries::Decoded).text())
+                    .col(ColumnDef::new(LogEntries::Json).text())
+                    .to_owned(),
+            )
+            .await?;
+
         // create the entity attributes table
         manager
             .create_table(
@@ -60,6 +113,24 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        // create the entity types table
+        manager
+            .create_table(
+                Table::create()
+                    .table(EntityTypes::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(EntityTypes::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(EntityTypes::EntityId).string())
+                    .col(ColumnDef::new(EntityTypes::Type).text())
+                    .to_owned(),
+            )
+            .await?;
+
         // create the entities table
         manager
             .create_table(
@@ -73,9 +144,12 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(Entities::Name).string())
+                    .col(ColumnDef::new(Entities::Description).string())
                     .col(ColumnDef::new(Entities::IsType).boolean().default(false))
                     .col(ColumnDef::new(Entities::DefinedIn).text())
                     .col(ColumnDef::new(Entities::ValueType).text())
+                    .col(ColumnDef::new(Entities::Version).text())
+                    .col(ColumnDef::new(Entities::Versions).array(ColumnType::Text))
                     .to_owned(),
             )
             .await?;
@@ -88,11 +162,17 @@ impl MigrationTrait for Migration {
                     .if_not_exists()
                     .col(ColumnDef::new(Spaces::Id).text().unique_key().primary_key())
                     .col(ColumnDef::new(Spaces::Address).text())
+                    .col(ColumnDef::new(Spaces::CreatedAtBlock).integer())
+                    .col(ColumnDef::new(Spaces::IsRootSpace).boolean())
+                    .col(ColumnDef::new(Spaces::Admins).text())
+                    .col(ColumnDef::new(Spaces::EditorControllers).text())
+                    .col(ColumnDef::new(Spaces::Editors).text())
+                    .col(ColumnDef::new(Spaces::Entity).text())
                     .to_owned(),
             )
             .await?;
 
-        // make the triples table
+        // create the triples table
         manager
             .create_table(
                 Table::create()
@@ -110,6 +190,104 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Triples::ValueType).text().not_null())
                     .col(ColumnDef::new(Triples::Value).text().not_null())
                     .col(ColumnDef::new(Triples::DefinedIn).text().not_null())
+                    .col(ColumnDef::new(Triples::IsProtected).boolean())
+                    .to_owned(),
+            )
+            .await?;
+
+        // create the proposals table
+        manager
+            .create_table(
+                Table::create()
+                    .table(Proposals::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Proposals::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Proposals::Space).text().not_null())
+                    .col(ColumnDef::new(Proposals::Name).text())
+                    .col(ColumnDef::new(Proposals::Description).text())
+                    .col(ColumnDef::new(Proposals::CreatedAt).integer())
+                    .col(ColumnDef::new(Proposals::CreatedAtBlock).integer())
+                    .col(ColumnDef::new(Proposals::CreatedBy).text().not_null())
+                    .col(ColumnDef::new(Proposals::Status).text().not_null())
+                    .col(ColumnDef::new(Proposals::ProposedVersions).array(ColumnType::Text))
+                    .to_owned(),
+            )
+            .await?;
+
+        // create the proposed version tables
+        manager
+            .create_table(
+                Table::create()
+                    .table(ProposedVersions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(ProposedVersions::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(ProposedVersions::Name).text())
+                    .col(ColumnDef::new(ProposedVersions::Description).text())
+                    .col(ColumnDef::new(ProposedVersions::CreatedAt).integer())
+                    .col(ColumnDef::new(ProposedVersions::CreatedAtBlock).integer())
+                    .col(
+                        ColumnDef::new(ProposedVersions::CreatedBy)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(ProposedVersions::Entity).text())
+                    .col(ColumnDef::new(ProposedVersions::Actions).array(ColumnType::Text))
+                    .to_owned(),
+            )
+            .await?;
+
+        // create the actions table
+        manager
+            .create_table(
+                Table::create()
+                    .table(Actions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Actions::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Actions::Entity).text().not_null())
+                    .col(ColumnDef::new(Actions::Attribute).text())
+                    .col(ColumnDef::new(Actions::ValueType).text())
+                    .col(ColumnDef::new(Actions::ValueId).text())
+                    .col(ColumnDef::new(Actions::NumberValue).integer())
+                    .col(ColumnDef::new(Actions::StringValue).text())
+                    .col(ColumnDef::new(Actions::EntityValue).text())
+                    .col(ColumnDef::new(Actions::ArrayValue).array(ColumnType::Text))
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(Versions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Versions::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Versions::Name).text())
+                    .col(ColumnDef::new(Versions::Description).text())
+                    .col(ColumnDef::new(Versions::CreatedAt).integer())
+                    .col(ColumnDef::new(Versions::CreatedAtBlock).integer())
+                    .col(ColumnDef::new(Versions::CreatedBy).text().not_null())
+                    .col(ColumnDef::new(Versions::ProposedVersion).text())
+                    .col(ColumnDef::new(Versions::Actions).array(ColumnType::Text))
                     .to_owned(),
             )
             .await?;
@@ -118,26 +296,21 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Entities::Table).to_owned())
-            .await?;
-
-        manager
-            .drop_table(Table::drop().table(Spaces::Table).to_owned())
-            .await?;
-
-        manager
-            .drop_table(Table::drop().table(Cursors::Table).to_owned())
-            .await?;
-
-        manager
-            .drop_table(Table::drop().table(EntityAttributes::Table).to_owned())
-            .await?;
-
-        manager
-            .drop_table(Table::drop().table(Triples::Table).to_owned())
-            .await?;
-
+        drop_tables!(
+            manager,
+            Cursors,
+            Spaces,
+            Accounts,
+            Entities,
+            LogEntries,
+            EntityAttributes,
+            EntityTypes,
+            Triples,
+            Proposals,
+            ProposedVersions,
+            Actions,
+            Versions
+        );
         Ok(())
     }
 }
@@ -154,6 +327,12 @@ enum Spaces {
     Table,
     Id,
     Address,
+    IsRootSpace,
+    CreatedAtBlock,
+    Admins,
+    Editors,
+    EditorControllers,
+    Entity,
 }
 
 #[derive(DeriveIden)]
@@ -161,9 +340,31 @@ enum Entities {
     Table,
     Id,
     Name,
+    Description,
     IsType,
     ValueType,
     DefinedIn,
+    Version,
+    Versions,
+}
+
+#[derive(DeriveIden)]
+enum Accounts {
+    Table,
+    Id,
+}
+
+#[derive(DeriveIden)]
+enum LogEntries {
+    Table,
+    Id,
+    CreatedAtBlock,
+    Uri,
+    CreatedBy,
+    Space,
+    MimeType,
+    Decoded,
+    Json,
 }
 
 #[derive(DeriveIden)]
@@ -175,6 +376,14 @@ enum EntityAttributes {
 }
 
 #[derive(DeriveIden)]
+enum EntityTypes {
+    Table,
+    Id,
+    EntityId,
+    Type,
+}
+
+#[derive(DeriveIden)]
 enum Triples {
     Table,
     Id,
@@ -183,5 +392,60 @@ enum Triples {
     ValueId,
     ValueType,
     Value,
+    IsProtected,
     DefinedIn,
+}
+
+#[derive(DeriveIden)]
+enum Proposals {
+    Table,
+    Id,
+    Name,
+    Description,
+    CreatedBy,
+    Space,
+    Status,
+    CreatedAt, // block timestamp
+    ProposedVersions,
+    CreatedAtBlock,
+}
+
+#[derive(DeriveIden)]
+enum ProposedVersions {
+    Table,
+    Id,
+    Name,
+    Description,
+    CreatedBy,
+    Entity,
+    CreatedAt, // block timestamp
+    CreatedAtBlock,
+    Actions,
+}
+
+#[derive(DeriveIden)]
+enum Versions {
+    Table,
+    Id,
+    Name,
+    Description,
+    CreatedBy,
+    CreatedAt, // block timestamp
+    CreatedAtBlock,
+    ProposedVersion,
+    Actions,
+}
+
+#[derive(DeriveIden)]
+enum Actions {
+    Table,
+    Id,
+    Entity,
+    Attribute,
+    ValueType,
+    ValueId,
+    NumberValue,
+    StringValue,
+    EntityValue,
+    ArrayValue,
 }

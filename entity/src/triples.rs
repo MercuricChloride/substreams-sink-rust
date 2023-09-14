@@ -19,6 +19,7 @@ pub struct Model {
     pub value: String,
     #[sea_orm(column_type = "Text")]
     pub defined_in: String,
+    pub is_protected: Option<bool>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

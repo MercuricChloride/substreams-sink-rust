@@ -48,6 +48,14 @@ pub mod entities {
         space: String,
         sender: &Sender<String>,
     ) -> Result<(), DbErr> {
+        let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
+
+        if let Some(_) = entity {
+            let message = format!("Entity {} already exists", entity_id);
+            sender.send(message).await.unwrap();
+            return Ok(());
+        }
+
         let message = format!("Creating entity {}", entity_id);
         sender.send(message).await.unwrap();
         drop(sender);

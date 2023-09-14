@@ -2,7 +2,7 @@ use anyhow::{format_err, Context, Error};
 use clap::Parser;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use futures03::{future::join_all, StreamExt};
-use gui::{ui, GuiData, StatefulList};
+use gui::{controls_handle, ui, GuiData, StatefulList};
 use migration::DbErr;
 use pb::schema::EntryAdded;
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
@@ -16,8 +16,10 @@ use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_query::OnConflict;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio::{join, try_join};
+use tui::tui_handle;
 
 use std::io::{Read, Stdout};
 use std::time::Duration;
@@ -31,11 +33,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
-use ratatui::{
-    backend::CrosstermBackend,
-    widgets::{Block, Borders},
-    Terminal,
-};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, thread};
 
 use crate::pb::schema::EntriesAdded;
@@ -53,6 +51,7 @@ mod sink_actions;
 mod substreams;
 mod substreams_stream;
 mod triples;
+pub mod tui;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -91,6 +90,10 @@ pub struct Args {
     /// Substreams API token, if not provided, SUBSTREAMS_API_TOKEN environment variable will be used
     #[arg(short, long, env = "SUBSTREAMS_API_TOKEN")]
     token: String,
+
+    /// Whether or not to use the GUI
+    #[arg(short, long)]
+    gui: bool,
 }
 
 pub async fn main() -> Result<(), Error> {
@@ -103,6 +106,7 @@ pub async fn main() -> Result<(), Error> {
         username,
         password,
         port,
+        gui,
     } = Args::parse();
 
     let start_block = 0;
@@ -114,6 +118,8 @@ pub async fn main() -> Result<(), Error> {
         block_number: 0,
         information_in_block: false,
         tasks: StatefulList::with_items(vec!["Test Item".to_string(), "Another Item".to_string()]),
+        task_count: 0,
+        should_quit: false,
     }));
 
     let package = read_package(&package_file).await?;
@@ -121,14 +127,14 @@ pub async fn main() -> Result<(), Error> {
 
     let mut opt = ConnectOptions::new(format!("postgres://{username}:{password}@{host}/postgres"));
     opt.max_lifetime(Duration::from_secs(1000))
-        .max_connections(70)
+        .max_connections(100)
         .connect_timeout(Duration::from_secs(1000));
 
     let db: DatabaseConnection = Database::connect(opt).await?;
 
     let cursor: Option<String> = cursor::get(&db).await?;
 
-    let mut stream = SubstreamsStream::new(
+    let stream = SubstreamsStream::new(
         endpoint.clone(),
         cursor,
         package.modules.clone(),
@@ -138,26 +144,44 @@ pub async fn main() -> Result<(), Error> {
         46904315,
     );
 
-    let gui_task_clone = gui_data_lock.clone();
-    let terminal_task = tokio::task::spawn(async move {
-        let mut terminal = setup_terminal().unwrap();
-        run(&mut terminal, gui_task_clone).await;
-        restore_terminal(&mut terminal);
-    });
+    // we need to be able to respond to user input while the stream is running
+    // ie close the stream and exit the program
+    let controls_clone = gui_data_lock.clone();
+    let controls_task = controls_handle(controls_clone);
+
+    let tui_task_clone = gui_data_lock.clone();
+    let tui_task = tui_handle(tui_task_clone, gui);
 
     let task_clone = gui_data_lock.clone();
+    let stream_task = stream_handle(task_clone, db, stream, gui);
 
-    let stream_task = tokio::task::spawn(async move {
-        let stream_task_clone = task_clone.clone();
+    let _ = join!(stream_task, tui_task, controls_task);
+    exit(0);
+}
+
+fn stream_handle(
+    lock: Arc<RwLock<GuiData>>,
+    db: DatabaseConnection,
+    mut stream: SubstreamsStream,
+    use_gui: bool,
+) -> JoinHandle<()> {
+    tokio::task::spawn(async move {
         loop {
-            let stream_task_clone = stream_task_clone.clone();
+            let stream_task_clone = lock.clone();
+            let reader = stream_task_clone.read().await;
+            // if the signal is to quit, close the stream
+            if reader.should_quit {
+                break;
+            }
+            drop(reader);
+
             match stream.next().await {
                 None => {
                     println!("Stream consumed");
                     break;
                 }
                 Some(Ok(BlockResponse::New(data))) => {
-                    process_block_scoped_data(data, &db, stream_task_clone).await;
+                    process_block_scoped_data(data, &db, stream_task_clone, use_gui).await;
                 }
                 Some(Ok(BlockResponse::Undo(undo_signal))) => {
                     process_block_undo_signal(&undo_signal).unwrap();
@@ -170,56 +194,14 @@ pub async fn main() -> Result<(), Error> {
                 }
             }
         }
-    });
-
-    let _ = join!(stream_task, terminal_task);
-
-    Ok(())
-}
-
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Error> {
-    let mut stdout = io::stdout();
-    //enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen)?;
-    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
-}
-
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Error> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen,)?;
-    Ok(terminal.show_cursor()?)
-}
-
-async fn run(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    gui_data_lock: Arc<RwLock<GuiData>>,
-) -> Result<(), Error> {
-    let mut render_count = 0;
-    loop {
-        render_count += 1;
-
-        let gui_data = gui_data_lock.read().await;
-        terminal.draw(|frame| {
-            ui(frame, &gui_data, render_count);
-        });
-        drop(gui_data);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        // if event::poll(Duration::from_millis(0))? {
-        //     if let Event::Key(key) = event::read()? {
-        //         if KeyCode::Char('q') == key.code {
-        //             break;
-        //         }
-        //     }
-        // }
-    }
-
-    Ok(())
+    })
 }
 
 async fn process_block_scoped_data(
     data: BlockScopedData,
     db: &DatabaseConnection,
     gui_data_lock: Arc<RwLock<GuiData>>,
+    use_gui: bool,
 ) -> Result<(), Error> {
     if let Some(output) = &data.output {
         if let Some(map_output) = &output.map_output {
@@ -259,9 +241,14 @@ async fn process_block_scoped_data(
             });
 
             while let Some(response) = rx.recv().await {
-                let mut gui_data = gui_data_lock.write().await;
-                gui_data.tasks.items.push(response);
-                drop(gui_data)
+                if !use_gui {
+                    println!("{}", response);
+                } else {
+                    let mut gui_data = gui_data_lock.write().await;
+                    gui_data.tasks.push(response);
+                    gui_data.task_count += 1;
+                    drop(gui_data)
+                }
             }
 
             let results = try_join!(results);

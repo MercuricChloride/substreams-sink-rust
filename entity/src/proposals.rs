@@ -3,22 +3,23 @@
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
-#[sea_orm(table_name = "spaces")]
+#[sea_orm(table_name = "proposals")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false, column_type = "Text")]
     pub id: String,
+    #[sea_orm(column_type = "Text")]
+    pub space: String,
     #[sea_orm(column_type = "Text", nullable)]
-    pub address: Option<String>,
+    pub name: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub description: Option<String>,
+    pub created_at: Option<i32>,
     pub created_at_block: Option<i32>,
-    pub is_root_space: Option<bool>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub admins: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub editor_controllers: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub editors: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub entity: Option<String>,
+    #[sea_orm(column_type = "Text")]
+    pub created_by: String,
+    #[sea_orm(column_type = "Text")]
+    pub status: String,
+    pub proposed_versions: Option<Vec<String>>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

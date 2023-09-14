@@ -1,18 +1,22 @@
 use anyhow::Error;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, prelude::*, widgets::*, Terminal};
-use std::{
-    io::{self, Stdout},
-    thread,
+use ratatui::{
+    backend::CrosstermBackend,
+    prelude::*,
+    widgets::{block::Position, *},
 };
+
+use std::{io::Stdout, sync::Arc, thread};
+
+use tokio::{spawn, sync::RwLock, task::JoinHandle};
 
 pub struct StatefulList<T> {
     state: ListState,
-    pub items: Vec<T>,
+    items: Vec<T>,
 }
 
 impl<T> StatefulList<T> {
@@ -22,7 +26,11 @@ impl<T> StatefulList<T> {
             items: Vec::new(),
         }
     }
+
     pub fn push(&mut self, item: T) {
+        if self.items.len() > 100 {
+            self.items.remove(0);
+        }
         self.items.push(item);
     }
 
@@ -72,19 +80,19 @@ pub struct GuiData {
     pub block_number: u64,
     pub information_in_block: bool,
     pub tasks: StatefulList<String>,
+    pub task_count: u64,
+    pub should_quit: bool,
 }
 
-pub fn ui(
-    f: &mut Frame<CrosstermBackend<Stdout>>,
-    app: &GuiData,
-    render_count: i32,
-) -> Result<(), Error> {
+pub fn ui(f: &mut Frame<CrosstermBackend<Stdout>>, app: &GuiData) -> Result<(), Error> {
     let GuiData {
         start_block,
         stop_block,
         block_number,
         information_in_block,
         tasks,
+        task_count,
+        should_quit,
     } = &app;
 
     let chunks = Layout::default()
@@ -95,7 +103,8 @@ pub fn ui(
                 Constraint::Percentage(10),
                 Constraint::Percentage(10),
                 Constraint::Percentage(10),
-                Constraint::Percentage(70),
+                Constraint::Percentage(65),
+                Constraint::Percentage(5),
             ]
             .as_ref(),
         )
@@ -116,12 +125,11 @@ pub fn ui(
     let block = Block::default().title(title).bg(bg).borders(Borders::ALL);
     f.render_widget(block, size);
 
-    // Draw a title that shows how many renders we have done
-    let render_title = format!("Render count: {}", render_count);
+    let action_count = format!("Actions taken in the DB: {}", task_count);
     let size = chunks[1];
     let block = Block::default()
-        .title(render_title)
-        .bg(Color::Blue)
+        .title(action_count)
+        //.bg(Color::Blue)
         .borders(Borders::ALL);
     f.render_widget(block, size);
 
@@ -130,13 +138,17 @@ pub fn ui(
 
     let percent = match block_number {
         0 => 0,
-        _ => (block_number / stop_block) * 100,
+        _ => ((block_number - start_block) * 100) / (stop_block - start_block),
     };
 
     let gauge = Gauge::default()
         .block(
             Block::default()
-                .title("Indexing Progress")
+                .title(format!(
+                    "Indexing Progress, {}/{}",
+                    block_number, stop_block
+                ))
+                .title_alignment(Alignment::Center)
                 .borders(Borders::ALL),
         )
         .gauge_style(Style::default().fg(Color::Yellow))
@@ -171,6 +183,44 @@ pub fn ui(
     let task_widget =
         List::new(task_list).block(Block::default().borders(Borders::ALL).title("Tasks"));
     f.render_widget(task_widget, size);
-    //f.render_stateful_widget(task_widget, size, &mut app.tasks.state);
+
+    let size = chunks[4];
+    let block = Block::default()
+        .title("CONTROLS: q: close app | j: up | k: down")
+        .title_alignment(Alignment::Center)
+        .title_position(Position::Bottom)
+        .bg(bg)
+        .borders(Borders::NONE);
+    f.render_widget(block, size);
     Ok(())
+}
+
+/// A function that returns a join handler for the controls thread
+/// This thread handles the keyboard input
+pub fn controls_handle(lock: Arc<RwLock<GuiData>>) -> JoinHandle<()> {
+    spawn(async move {
+        loop {
+            let event = event::read().unwrap();
+            match event {
+                Event::Key(key) => {
+                    let key_pressed = key.code;
+                    match key_pressed {
+                        KeyCode::Char('q') => {
+                            let mut controls = lock.write().await;
+                            controls.should_quit = true;
+                            drop(controls);
+                            break;
+                        }
+                        KeyCode::Char('j') => {
+                            let mut controls = lock.write().await;
+                            controls.tasks.next();
+                            drop(controls);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
 }
