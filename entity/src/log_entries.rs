@@ -7,13 +7,14 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false, column_type = "Text")]
     pub id: String,
-    pub created_at_block: Option<DateTime>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub uri: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub created_by: Option<String>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub space: Option<String>,
+    #[sea_orm(column_type = "Text")]
+    pub created_at_block: String,
+    #[sea_orm(column_type = "Text")]
+    pub uri: String,
+    #[sea_orm(column_type = "Text")]
+    pub created_by: String,
+    #[sea_orm(column_type = "Text")]
+    pub space: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub mime_type: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]

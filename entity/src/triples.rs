@@ -16,10 +16,16 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub value_type: String,
     #[sea_orm(column_type = "Text")]
-    pub value: String,
-    #[sea_orm(column_type = "Text")]
     pub defined_in: String,
-    pub is_protected: Option<bool>,
+    pub is_protected: bool,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub number_value: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub array_value: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub string_value: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub entity_value: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

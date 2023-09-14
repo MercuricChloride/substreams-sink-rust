@@ -17,6 +17,7 @@ pub mod spaces {
         let space = ActiveModel {
             id: ActiveValue::Set(space_id.to_owned()),
             address: ActiveValue::Set(Some(address)),
+            ..Default::default()
         };
 
         let message = format!("Creating space {}", space_id);
@@ -62,7 +63,7 @@ pub mod entities {
 
         let entity = ActiveModel {
             id: ActiveValue::Set(entity_id),
-            defined_in: ActiveValue::Set(space),
+            defined_in: ActiveValue::Set(Some(space)),
             ..Default::default()
         };
 
@@ -236,15 +237,36 @@ pub mod triples {
         sender.send(message).await.unwrap();
         drop(sender);
 
-        let triple = ActiveModel {
+        let mut triple = ActiveModel {
             id: ActiveValue::Set(id.clone()),
             entity_id: ActiveValue::Set(entity_id),
             attribute_id: ActiveValue::Set(attribute_id),
-            value: ActiveValue::Set(value.value()),
             value_id: ActiveValue::Set(value.id().to_string()),
             value_type: ActiveValue::Set(value.value_type().to_string()),
             defined_in: ActiveValue::Set(space),
+            ..Default::default()
         };
+
+        match value {
+            ValueType::Number { id, value } => {
+                triple.number_value = ActiveValue::Set(Some(value.to_string()));
+            }
+            ValueType::String { id, value } => {
+                triple.string_value = ActiveValue::Set(Some(value));
+            }
+            ValueType::Image { id, value } => {
+                triple.string_value = ActiveValue::Set(Some(value));
+            }
+            ValueType::Entity { id } => {
+                triple.entity_value = ActiveValue::Set(Some(id));
+            }
+            ValueType::Date { id, value } => {
+                triple.string_value = ActiveValue::Set(Some(value));
+            }
+            ValueType::Url { id, value } => {
+                triple.string_value = ActiveValue::Set(Some(value));
+            }
+        }
 
         Entity::insert(triple)
             .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
@@ -262,18 +284,19 @@ pub mod triples {
         value: ValueType,
         space: String,
     ) -> Result<(), DbErr> {
-        let triple = ActiveModel {
-            id: ActiveValue::Set(format!("{}-{}-{}", entity_id, attribute_id, value.id())),
-            entity_id: ActiveValue::Set(entity_id),
-            attribute_id: ActiveValue::Set(attribute_id),
-            value: ActiveValue::Set(value.value().to_string()),
-            value_id: ActiveValue::Set(value.id().to_string()),
-            value_type: ActiveValue::Set(value.value_type().to_string()),
-            defined_in: ActiveValue::Set(space),
-        };
+        todo!("Need to handle delete triples");
+        // let triple = ActiveModel {
+        //     id: ActiveValue::Set(format!("{}-{}-{}", entity_id, attribute_id, value.id())),
+        //     entity_id: ActiveValue::Set(entity_id),
+        //     attribute_id: ActiveValue::Set(attribute_id),
+        //     value: ActiveValue::Set(value.value().to_string()),
+        //     value_id: ActiveValue::Set(value.id().to_string()),
+        //     value_type: ActiveValue::Set(value.value_type().to_string()),
+        //     defined_in: ActiveValue::Set(space),
+        // };
 
-        Entity::delete(triple).exec(db).await?;
+        // Entity::delete(triple).exec(db).await?;
 
-        Ok(())
+        // Ok(())
     }
 }

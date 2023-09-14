@@ -80,10 +80,10 @@ impl MigrationTrait for Migration {
                             .unique_key()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(LogEntries::CreatedAtBlock).timestamp())
-                    .col(ColumnDef::new(LogEntries::Uri).text())
-                    .col(ColumnDef::new(LogEntries::CreatedBy).text())
-                    .col(ColumnDef::new(LogEntries::Space).text())
+                    .col(ColumnDef::new(LogEntries::CreatedAtBlock).text().not_null())
+                    .col(ColumnDef::new(LogEntries::Uri).text().not_null())
+                    .col(ColumnDef::new(LogEntries::CreatedBy).text().not_null())
+                    .col(ColumnDef::new(LogEntries::Space).text().not_null())
                     .col(ColumnDef::new(LogEntries::MimeType).text())
                     .col(ColumnDef::new(LogEntries::Decoded).text())
                     .col(ColumnDef::new(LogEntries::Json).text())
@@ -125,8 +125,8 @@ impl MigrationTrait for Migration {
                             .unique_key()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(EntityTypes::EntityId).string())
-                    .col(ColumnDef::new(EntityTypes::Type).text())
+                    .col(ColumnDef::new(EntityTypes::EntityId).text().not_null())
+                    .col(ColumnDef::new(EntityTypes::Type).text().not_null())
                     .to_owned(),
             )
             .await?;
@@ -188,9 +188,12 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Triples::AttributeId).text().not_null())
                     .col(ColumnDef::new(Triples::ValueId).text().not_null())
                     .col(ColumnDef::new(Triples::ValueType).text().not_null())
-                    .col(ColumnDef::new(Triples::Value).text().not_null())
                     .col(ColumnDef::new(Triples::DefinedIn).text().not_null())
-                    .col(ColumnDef::new(Triples::IsProtected).boolean())
+                    .col(ColumnDef::new(Triples::IsProtected).boolean().not_null())
+                    .col(ColumnDef::new(Triples::NumberValue).text())
+                    .col(ColumnDef::new(Triples::ArrayValue).text())
+                    .col(ColumnDef::new(Triples::StringValue).text())
+                    .col(ColumnDef::new(Triples::EntityValue).text())
                     .to_owned(),
             )
             .await?;
@@ -210,9 +213,13 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Proposals::Space).text().not_null())
                     .col(ColumnDef::new(Proposals::Name).text())
                     .col(ColumnDef::new(Proposals::Description).text())
-                    .col(ColumnDef::new(Proposals::CreatedAt).integer())
-                    .col(ColumnDef::new(Proposals::CreatedAtBlock).integer())
-                    .col(ColumnDef::new(Proposals::CreatedBy).text().not_null())
+                    .col(ColumnDef::new(Proposals::CreatedAt).integer().not_null())
+                    .col(
+                        ColumnDef::new(Proposals::CreatedAtBlock)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(Proposals::CreatedBy).text())
                     .col(ColumnDef::new(Proposals::Status).text().not_null())
                     .col(ColumnDef::new(Proposals::ProposedVersions).array(ColumnType::Text))
                     .to_owned(),
@@ -233,14 +240,22 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(ProposedVersions::Name).text())
                     .col(ColumnDef::new(ProposedVersions::Description).text())
-                    .col(ColumnDef::new(ProposedVersions::CreatedAt).integer())
-                    .col(ColumnDef::new(ProposedVersions::CreatedAtBlock).integer())
+                    .col(
+                        ColumnDef::new(ProposedVersions::CreatedAt)
+                            .integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(ProposedVersions::CreatedAtBlock)
+                            .integer()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(ProposedVersions::CreatedBy)
                             .text()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(ProposedVersions::Entity).text())
+                    .col(ColumnDef::new(ProposedVersions::Entity).text().not_null())
                     .col(ColumnDef::new(ProposedVersions::Actions).array(ColumnType::Text))
                     .to_owned(),
             )
@@ -258,6 +273,7 @@ impl MigrationTrait for Migration {
                             .unique_key()
                             .primary_key(),
                     )
+                    .col(ColumnDef::new(Actions::ActionType).text().not_null())
                     .col(ColumnDef::new(Actions::Entity).text().not_null())
                     .col(ColumnDef::new(Actions::Attribute).text())
                     .col(ColumnDef::new(Actions::ValueType).text())
@@ -270,6 +286,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        // create the versions table
         manager
             .create_table(
                 Table::create()
@@ -283,10 +300,14 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Versions::Name).text())
                     .col(ColumnDef::new(Versions::Description).text())
-                    .col(ColumnDef::new(Versions::CreatedAt).integer())
-                    .col(ColumnDef::new(Versions::CreatedAtBlock).integer())
+                    .col(ColumnDef::new(Versions::CreatedAt).integer().not_null())
+                    .col(
+                        ColumnDef::new(Versions::CreatedAtBlock)
+                            .integer()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Versions::CreatedBy).text().not_null())
-                    .col(ColumnDef::new(Versions::ProposedVersion).text())
+                    .col(ColumnDef::new(Versions::ProposedVersion).text().not_null())
                     .col(ColumnDef::new(Versions::Actions).array(ColumnType::Text))
                     .to_owned(),
             )
@@ -391,7 +412,10 @@ enum Triples {
     AttributeId,
     ValueId,
     ValueType,
-    Value,
+    NumberValue,
+    StringValue,
+    EntityValue,
+    ArrayValue,
     IsProtected,
     DefinedIn,
 }
@@ -440,6 +464,7 @@ enum Versions {
 enum Actions {
     Table,
     Id,
+    ActionType,
     Entity,
     Attribute,
     ValueType,

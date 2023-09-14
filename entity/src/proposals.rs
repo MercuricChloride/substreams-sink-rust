@@ -13,10 +13,10 @@ pub struct Model {
     pub name: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub description: Option<String>,
-    pub created_at: Option<i32>,
-    pub created_at_block: Option<i32>,
-    #[sea_orm(column_type = "Text")]
-    pub created_by: String,
+    pub created_at: i32,
+    pub created_at_block: i32,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub created_by: Option<String>,
     #[sea_orm(column_type = "Text")]
     pub status: String,
     pub proposed_versions: Option<Vec<String>>,
