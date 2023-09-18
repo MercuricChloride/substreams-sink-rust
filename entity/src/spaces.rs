@@ -9,7 +9,8 @@ pub struct Model {
     pub id: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub address: Option<String>,
-    pub created_at_block: Option<i32>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub created_at_block: Option<String>,
     pub is_root_space: Option<bool>,
     #[sea_orm(column_type = "Text", nullable)]
     pub admins: Option<String>,

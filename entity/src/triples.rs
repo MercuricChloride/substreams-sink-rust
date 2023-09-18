@@ -29,35 +29,6 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::entities::Entity",
-        from = "Column::EntityId",
-        to = "super::entities::Column::Id"
-    )]
-    EntityRelation,
-
-    #[sea_orm(
-        belongs_to = "super::entities::Entity",
-        from = "Column::AttributeId",
-        to = "super::entities::Column::Id"
-    )]
-    AttributeRelation,
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
-
-pub struct TriplesToEntity;
-
-impl Linked for TriplesToEntity {
-    type FromEntity = Entity;
-
-    type ToEntity = super::entities::Entity;
-
-    fn link(&self) -> Vec<RelationDef> {
-        vec![
-            Relation::EntityRelation.def().rev(),
-            Relation::AttributeRelation.def(),
-        ]
-    }
-}

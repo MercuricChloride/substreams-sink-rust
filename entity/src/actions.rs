@@ -17,7 +17,8 @@ pub struct Model {
     pub value_type: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub value_id: Option<String>,
-    pub number_value: Option<i32>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub number_value: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub string_value: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]

@@ -20,16 +20,26 @@
 //!
 //! `(Me, YearsOld, 22)`
 
+use anyhow::Error;
 use base64::{engine::general_purpose, Engine as _};
+use futures03::future::{join_all, try_join_all};
+use migration::DbErr;
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc::Sender;
 
-use crate::{constants::Attributes, pb::schema::EntryAdded, sink_actions::SinkAction};
+use crate::{
+    constants::Attributes,
+    models::{self, accounts, actions},
+    pb::schema::EntryAdded,
+    sink_actions::SinkAction,
+};
 
 pub const IPFS_ENDPOINT: &str = "https://ipfs.network.thegraph.com/api/v0/cat?arg=";
 
 // An action is a collection of action triples, this is used to represent a change to the graph.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Action {
     /// Tbh I'm not sure why this is called type, but it is.
     #[serde(rename = "type")]
@@ -41,26 +51,34 @@ pub struct Action {
     /// the space that this action was emitted from
     #[serde(skip)]
     pub space: String,
+    /// The author of this action
+    #[serde(skip)]
+    pub author: String,
 }
 
 impl Action {
-    fn decode_with_space(json: &[u8], updated_space: &str) -> Self {
-        let mut action: Action = serde_json::from_slice(json).unwrap();
-        for action_triple in action.actions.iter_mut() {
-            match action_triple {
-                ActionTriple::CreateEntity { space, .. } => {
-                    *space = updated_space.to_string();
-                }
-                ActionTriple::CreateTriple { space, .. } => {
-                    *space = updated_space.to_string();
-                }
-                ActionTriple::DeleteTriple { space, .. } => {
-                    *space = updated_space.to_string();
-                }
-            }
-        }
-        action.space = updated_space.to_string();
-        action
+    /// This function adds all of the action triples in this action to the database.
+    pub async fn execute_action_triples(
+        &self,
+        db: &DatabaseConnection,
+        sender: &Sender<String>,
+    ) -> Result<(), DbErr> {
+        try_join_all(
+            self.actions
+                .iter()
+                .map(|action_triple| action_triple.execute(db, sender)),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn add_author_to_db(
+        &self,
+        db: &DatabaseConnection,
+        sender: &Sender<String>,
+    ) -> Result<(), DbErr> {
+        let author_address = self.author.clone();
+        accounts::create(db, author_address, sender).await
     }
 
     /// This function returns a vector of all the sink actions that should be handled in this action.
@@ -71,14 +89,42 @@ impl Action {
             .collect::<Vec<SinkAction>>()
     }
 
-    pub async fn decode_from_entry(entry: &EntryAdded) -> Self {
+    fn decode_with_space(
+        json: &[u8],
+        updated_space: &str,
+        updated_author: &str,
+    ) -> Result<Self, Error> {
+        let mut action: Action = serde_json::from_slice(json)?;
+        for action_triple in action.actions.iter_mut() {
+            match action_triple {
+                ActionTriple::CreateEntity { space, author, .. } => {
+                    *space = updated_space.to_string();
+                    *author = updated_author.to_string();
+                }
+                ActionTriple::CreateTriple { space, author, .. } => {
+                    *space = updated_space.to_string();
+                    *author = updated_author.to_string();
+                }
+                ActionTriple::DeleteTriple { space, author, .. } => {
+                    *space = updated_space.to_string();
+                    *author = updated_author.to_string();
+                }
+            }
+        }
+        action.space = updated_space.to_string();
+        action.author = updated_author.to_string();
+        Ok(action)
+    }
+
+    pub async fn decode_from_entry(entry: &EntryAdded) -> Result<Self, Error> {
         let uri = &entry.uri;
         match uri {
             uri if uri.starts_with("data:application/json;base64,") => {
                 let data = uri.split("base64,").last().unwrap();
                 let decoded = general_purpose::URL_SAFE.decode(data.as_bytes()).unwrap();
                 let space = &entry.space;
-                Action::decode_with_space(&decoded, space)
+                let author = &entry.author;
+                Action::decode_with_space(&decoded, space, author)
             }
             uri if uri.starts_with("ipfs://") => {
                 let cid = uri.trim_start_matches("ipfs://");
@@ -89,7 +135,8 @@ impl Action {
 
                 if let Ok(data) = std::fs::read_to_string(&path) {
                     let space = &entry.space;
-                    return Action::decode_with_space(data.as_bytes(), space);
+                    let author = &entry.author;
+                    return Action::decode_with_space(data.as_bytes(), space, author);
                 } else {
                     let mut attempts: i32 = 0;
                     let data;
@@ -104,20 +151,24 @@ impl Action {
                                 attempts += 1;
 
                                 if attempts > 3 {
-                                    panic!("{err}, IPFS fetch failed more than 3 times")
+                                    return Err(Error::msg(format!(
+                                        "Failed to fetch IPFS data: {}",
+                                        err
+                                    )));
                                 }
                             }
                         }
                     }
                     let space = &entry.space;
+                    let author = &entry.author;
 
                     // cache the file locally
-                    std::fs::write(&path, &data).unwrap();
+                    std::fs::write(&path, &data)?;
 
-                    Action::decode_with_space(&data.as_bytes(), space)
+                    Action::decode_with_space(&data.as_bytes(), space, author)
                 }
             }
-            _ => panic!("Invalid URI"), //TODO Handle this gracefully
+            _ => Err(Error::msg("Invalid URI")),
         }
     }
 }
@@ -131,6 +182,8 @@ pub enum ActionTriple {
         entity_id: String,
         #[serde(skip)]
         space: String,
+        #[serde(skip)]
+        author: String,
     },
     CreateTriple {
         entity_id: String,
@@ -138,6 +191,8 @@ pub enum ActionTriple {
         value: ValueType,
         #[serde(skip)]
         space: String,
+        #[serde(skip)]
+        author: String,
     },
     DeleteTriple {
         entity_id: String,
@@ -145,6 +200,8 @@ pub enum ActionTriple {
         value: ValueType,
         #[serde(skip)]
         space: String,
+        #[serde(skip)]
+        author: String,
     },
 }
 
@@ -159,18 +216,21 @@ impl<'de> Deserialize<'de> for ActionTriple {
             Some("createEntity") => Ok(ActionTriple::CreateEntity {
                 entity_id: val["entityId"].as_str().unwrap().to_string(),
                 space: "".to_string(),
+                author: "".to_string(),
             }),
             Some("createTriple") => Ok(ActionTriple::CreateTriple {
                 entity_id: val["entityId"].as_str().unwrap().to_string(),
                 attribute_id: val["attributeId"].as_str().unwrap().to_string(),
                 value: serde_json::from_value(val["value"].clone()).unwrap(),
                 space: "".to_string(),
+                author: "".to_string(),
             }),
             Some("deleteTriple") => Ok(ActionTriple::DeleteTriple {
                 entity_id: val["entityId"].as_str().unwrap().to_string(),
                 attribute_id: val["attributeId"].as_str().unwrap().to_string(),
                 value: serde_json::from_value(val["value"].clone()).unwrap(),
                 space: "".to_string(),
+                author: "".to_string(),
             }),
             _ => Err(serde::de::Error::custom("Unknown type")),
         }
@@ -178,6 +238,31 @@ impl<'de> Deserialize<'de> for ActionTriple {
 }
 
 impl ActionTriple {
+    /// This method includes the action_triple in the database
+    pub async fn execute(
+        &self,
+        db: &DatabaseConnection,
+        sender: &Sender<String>,
+    ) -> Result<(), DbErr> {
+        actions::create(db, self, sender).await
+    }
+
+    pub fn action_type(&self) -> &'static str {
+        match self {
+            ActionTriple::CreateEntity { .. } => "createEntity",
+            ActionTriple::CreateTriple { .. } => "createTriple",
+            ActionTriple::DeleteTriple { .. } => "deleteTriple",
+        }
+    }
+
+    pub fn entity_id(&self) -> &String {
+        match self {
+            ActionTriple::CreateEntity { entity_id, .. } => entity_id,
+            ActionTriple::CreateTriple { entity_id, .. } => entity_id,
+            ActionTriple::DeleteTriple { entity_id, .. } => entity_id,
+        }
+    }
+
     /// This method returns a vector of all the sink actions that should be handled in this action triple.
     pub fn get_sink_actions(self) -> Vec<SinkAction> {
         // all of the possible actions that can be taken in an action triple.
@@ -202,30 +287,40 @@ impl ActionTriple {
 
     fn get_default_action(self) -> SinkAction {
         match self {
-            ActionTriple::CreateEntity { entity_id, space } => {
-                SinkAction::EntityCreated { space, entity_id }
-            }
+            ActionTriple::CreateEntity {
+                entity_id,
+                space,
+                author,
+            } => SinkAction::EntityCreated {
+                space,
+                entity_id,
+                author,
+            },
             ActionTriple::CreateTriple {
                 entity_id,
                 attribute_id,
                 value,
                 space,
+                author,
             } => SinkAction::TripleAdded {
                 space,
                 entity_id,
                 attribute_id,
                 value,
+                author,
             },
             ActionTriple::DeleteTriple {
                 entity_id,
                 attribute_id,
                 value,
                 space,
+                author,
             } => SinkAction::TripleDeleted {
                 space,
                 entity_id,
                 attribute_id,
                 value,
+                author,
             },
         }
     }
@@ -235,8 +330,8 @@ impl ActionTriple {
             ActionTriple::CreateTriple {
                 entity_id,
                 attribute_id,
-                value: _,
                 space,
+                ..
             } if attribute_id.starts_with(Attributes::Type.id()) => Some(SinkAction::TypeCreated {
                 entity_id: entity_id.to_string(),
                 space: space.to_string(),
@@ -274,6 +369,7 @@ impl ActionTriple {
                 attribute_id,
                 value,
                 space,
+                ..
             } if attribute_id.starts_with(Attributes::Attribute.id()) => {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::Entity { id } = value {
@@ -298,6 +394,7 @@ impl ActionTriple {
                 attribute_id,
                 value,
                 space,
+                ..
             } if attribute_id.starts_with(Attributes::Name.id()) => {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::String { value, .. } = value {
@@ -321,6 +418,7 @@ impl ActionTriple {
                 attribute_id,
                 value,
                 space,
+                ..
             } if attribute_id.starts_with(Attributes::ValueType.id()) => {
                 Some(SinkAction::ValueTypeAdded {
                     space: space.clone(),
@@ -339,7 +437,7 @@ impl ActionTriple {
                 entity_id,
                 attribute_id,
                 value,
-                space: _,
+                ..
             } if attribute_id.starts_with(Attributes::Subspace.id()) => {
                 let child_space_id = match value {
                     ValueType::Entity { id } => id,
@@ -361,7 +459,7 @@ impl ActionTriple {
                 entity_id,
                 attribute_id,
                 value,
-                space: _,
+                ..
             } if attribute_id.starts_with(Attributes::Subspace.id()) => {
                 let child_space_id = match value {
                     ValueType::Entity { id } => id,

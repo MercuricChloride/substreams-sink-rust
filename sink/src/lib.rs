@@ -1,6 +1,8 @@
 use anyhow::{format_err, Context, Error};
 use clap::Parser;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use futures03::future::try_join_all;
+use futures03::stream::FuturesUnordered;
 use futures03::{future::join_all, StreamExt};
 use gui::{controls_handle, ui, GuiData, StatefulList};
 use migration::DbErr;
@@ -14,7 +16,7 @@ use sea_orm::{ActiveValue, ConnectOptions, DatabaseTransaction, TransactionTrait
 use prost::Message;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_query::OnConflict;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -22,7 +24,7 @@ use tokio::{join, try_join};
 use tui::tui_handle;
 
 use std::io::{Read, Stdout};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::{process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
@@ -113,6 +115,7 @@ pub async fn main() -> Result<(), Error> {
     let stop_block = 46904315;
 
     let gui_data_lock = Arc::new(RwLock::new(GuiData {
+        sink_start_time: SystemTime::now(),
         start_block,
         stop_block,
         block_number: 0,
@@ -127,7 +130,7 @@ pub async fn main() -> Result<(), Error> {
 
     let mut opt = ConnectOptions::new(format!("postgres://{username}:{password}@{host}/postgres"));
     opt.max_lifetime(Duration::from_secs(1000))
-        .max_connections(100)
+        .max_connections(90)
         .connect_timeout(Duration::from_secs(1000));
 
     let db: DatabaseConnection = Database::connect(opt).await?;
@@ -146,55 +149,75 @@ pub async fn main() -> Result<(), Error> {
 
     // we need to be able to respond to user input while the stream is running
     // ie close the stream and exit the program
-    let controls_clone = gui_data_lock.clone();
-    let controls_task = controls_handle(controls_clone);
+    if gui {
+        let task_clone = gui_data_lock.clone();
+        let tui_task_clone = gui_data_lock.clone();
+        let controls_clone = gui_data_lock.clone();
 
-    let tui_task_clone = gui_data_lock.clone();
-    let tui_task = tui_handle(tui_task_clone, gui);
+        let stream = tokio::spawn(stream_handle(task_clone, db, stream, gui));
+        let tui = tokio::spawn(tui_handle(tui_task_clone, gui));
+        let controls = tokio::spawn(controls_handle(controls_clone));
 
-    let task_clone = gui_data_lock.clone();
-    let stream_task = stream_handle(task_clone, db, stream, gui);
+        let res = try_join!(stream, tui, controls);
 
-    let _ = join!(stream_task, tui_task, controls_task);
-    exit(0);
+        match res {
+            Ok(response) => panic!("Response: {:?}", response),
+            Err(err) => {
+                panic!("Error: {:?}", err);
+                exit(1);
+            }
+        }
+    } else {
+        let task_clone = gui_data_lock.clone();
+        let stream = tokio::spawn(stream_handle(task_clone, db, stream, gui));
+        let res = try_join!(stream);
+
+        match res {
+            Ok(response) => panic!("Response: {:?}", response),
+            Err(err) => {
+                panic!("Error: {:?}", err);
+                exit(1);
+            }
+        }
+    }
 }
 
-fn stream_handle(
+async fn stream_handle(
     lock: Arc<RwLock<GuiData>>,
     db: DatabaseConnection,
     mut stream: SubstreamsStream,
     use_gui: bool,
-) -> JoinHandle<()> {
-    tokio::task::spawn(async move {
-        loop {
-            let stream_task_clone = lock.clone();
-            let reader = stream_task_clone.read().await;
-            // if the signal is to quit, close the stream
-            if reader.should_quit {
-                break;
-            }
-            drop(reader);
+) -> Result<(), Error> {
+    //tokio::task::spawn(async move {
+    loop {
+        let stream_task_clone = lock.clone();
+        let reader = stream_task_clone.read().await;
+        // if the signal is to quit, close the stream
+        if reader.should_quit {
+            return Ok(());
+        }
+        drop(reader);
 
-            match stream.next().await {
-                None => {
-                    println!("Stream consumed");
-                    break;
-                }
-                Some(Ok(BlockResponse::New(data))) => {
-                    process_block_scoped_data(data, &db, stream_task_clone, use_gui).await;
-                }
-                Some(Ok(BlockResponse::Undo(undo_signal))) => {
-                    process_block_undo_signal(&undo_signal).unwrap();
-                }
-                Some(Err(err)) => {
-                    println!();
-                    println!("Stream terminated with error");
-                    println!("{:?}", err);
-                    exit(1);
-                }
+        match stream.next().await {
+            None => {
+                println!("Stream consumed");
+                return Ok(());
+            }
+            Some(Ok(BlockResponse::New(data))) => {
+                process_block_scoped_data(data, &db, stream_task_clone, use_gui).await?
+            }
+            Some(Ok(BlockResponse::Undo(undo_signal))) => {
+                process_block_undo_signal(&undo_signal).unwrap();
+            }
+            Some(Err(err)) => {
+                println!();
+                println!("Stream terminated with error");
+                println!("{:?}", err);
+                exit(1);
             }
         }
-    })
+    }
+    //})
 }
 
 async fn process_block_scoped_data(
@@ -205,7 +228,7 @@ async fn process_block_scoped_data(
 ) -> Result<(), Error> {
     if let Some(output) = &data.output {
         if let Some(map_output) = &output.map_output {
-            let value = EntriesAdded::decode(map_output.value.as_slice())?;
+            let mut value = EntriesAdded::decode(map_output.value.as_slice())?;
             let mut gui_data = gui_data_lock.write().await;
 
             gui_data.block_number = data.clock.as_ref().unwrap().number;
@@ -221,43 +244,40 @@ async fn process_block_scoped_data(
 
             let (tx, mut rx) = tokio::sync::mpsc::channel(500_000);
 
-            let db = db.clone();
-            let results = tokio::task::spawn(async move {
-                let entries_to_handle = value
-                    .entries
+            let entries = value.entries;
+
+            let mut entry_futures = FuturesUnordered::from_iter(
+                entries
                     .iter()
-                    .map(|entry| handle_entry(&entry, &db, &tx))
-                    .collect::<Vec<_>>();
+                    .map(|entry| handle_entry(&entry, &db, tx.clone())),
+            );
 
-                let results = join_all(entries_to_handle)
-                    .await
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<Result<(), _>>>();
-
-                cursor::store(&db, data.cursor).await;
-
-                results
+            let message_task = tokio::spawn(async move {
+                while let Some(response) = rx.recv().await {
+                    if !use_gui {
+                        println!("{}", response);
+                    } else {
+                        let mut gui_data = gui_data_lock.write().await;
+                        gui_data.tasks.push(response);
+                        gui_data.task_count += 1;
+                        drop(gui_data);
+                    }
+                }
             });
 
-            while let Some(response) = rx.recv().await {
-                if !use_gui {
-                    println!("{}", response);
-                } else {
-                    let mut gui_data = gui_data_lock.write().await;
-                    gui_data.tasks.push(response);
-                    gui_data.task_count += 1;
-                    drop(gui_data)
+            drop(tx);
+
+            while let Some(result) = entry_futures.next().await {
+                match result {
+                    Ok(_) => {}
+                    Err(err) => {
+                        message_task.abort();
+                        return Err(err);
+                    }
                 }
             }
 
-            let results = try_join!(results);
-
-            for result in results.unwrap().0 {
-                if let Err(err) = result {
-                    return Err(err.into());
-                }
-            }
+            cursor::store(&db, data.cursor).await?;
         }
     }
 
@@ -267,11 +287,25 @@ async fn process_block_scoped_data(
 async fn handle_entry(
     entry: &EntryAdded,
     db: &DatabaseConnection,
-    sender: &Sender<String>,
-) -> Vec<Result<(), DbErr>> {
-    let action = Action::decode_from_entry(entry).await;
-    let sink_actions = action.get_sink_actions();
-    handle_sink_actions(sink_actions, db, sender).await
+    sender: Sender<String>,
+) -> Result<(), Error> {
+    let action = Action::decode_from_entry(entry).await?;
+
+    try_join!(
+        // we need to add the action triples to the database before we can handle the sink actions
+        action.execute_action_triples(db, &sender),
+        // we need to add the author of the action to the database
+        action.add_author_to_db(db, &sender),
+        {
+            // we need to execute the sink actions
+            let sink_actions = action.clone().get_sink_actions();
+            handle_sink_actions(sink_actions, db, &sender)
+        }
+    )?;
+
+    drop(sender);
+
+    Ok(())
 }
 
 fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {

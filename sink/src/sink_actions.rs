@@ -1,4 +1,4 @@
-use futures03::future::join_all;
+use futures03::future::{join_all, try_join_all};
 use migration::DbErr;
 use sea_orm::{DatabaseConnection, DatabaseTransaction};
 use tokio::sync::mpsc::Sender;
@@ -9,6 +9,18 @@ use crate::models::*;
 
 #[derive(Debug)]
 /// This enum represents different actions that the sink should handle. Actions being specific changes to the graph.
+/// You should understand that we have two kinds of actions.
+///
+/// The first being: "Default actions",
+/// All Sink actions will also be default actions, but not all default actions will be other sink actions.
+/// Because any actions we take in the sink are coming from action triples, we are going to store these action triples in the database.
+/// So the default actions are the enum variants:
+/// - `SinkAction::CreateTriple`
+/// - `SinkAction::DeleteTriple`
+/// - `SinkAction::CreateEntity`
+///
+/// The reason for this is just so we can keep track of what actions we have taken in the database.
+/// In addition to specific actions that should do special things, which are the rest of the variants.
 pub enum SinkAction {
     /// This action denotes a newly created space. The string is the address of the space.
     /// We care about this in the sink because when a new space is created, we need to deploy
@@ -80,10 +92,15 @@ pub enum SinkAction {
         entity_id: String,
         attribute_id: String,
         value: ValueType,
+        author: String,
     },
 
     /// If it's an entity creation action, we need to add the entity to the graph
-    EntityCreated { space: String, entity_id: String },
+    EntityCreated {
+        space: String,
+        entity_id: String,
+        author: String,
+    },
 
     /// If it's a triple deletion action, we need to remove the entity from the graph
     TripleDeleted {
@@ -91,6 +108,7 @@ pub enum SinkAction {
         entity_id: String,
         attribute_id: String,
         value: ValueType,
+        author: String,
     },
 }
 
@@ -98,13 +116,14 @@ pub async fn handle_sink_actions(
     sink_actions: Vec<SinkAction>,
     db: &DatabaseConnection,
     sender: &Sender<String>,
-) -> Vec<Result<(), DbErr>> {
-    join_all(
+) -> Result<(), DbErr> {
+    try_join_all(
         sink_actions
             .into_iter()
             .map(|action| action.execute(db, sender)),
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 impl SinkAction {
@@ -115,11 +134,11 @@ impl SinkAction {
     ) -> Result<(), DbErr> {
         match self {
             SinkAction::SpaceCreated { entity_id, space } => {
-                spaces::create(db, entity_id, space, sender).await
+                spaces::create(db, entity_id, space, sender).await?
             }
 
             SinkAction::TypeCreated { entity_id, space } => {
-                entities::upsert_is_type(db, entity_id, true, sender).await
+                entities::upsert_is_type(db, entity_id, true, sender).await?
             }
 
             SinkAction::AttributeAdded {
@@ -127,52 +146,48 @@ impl SinkAction {
                 entity_id,
                 attribute_id,
                 value,
-            } => {
-                let message = format!("Adding attribute {} to {}", value.id(), entity_id);
-                sender.send(message).await.unwrap();
-                entities::add_attribute(db, entity_id, value.id().to_string(), sender).await
-            }
-
+            } => entities::add_attribute(db, entity_id, value.id().to_string(), sender).await?,
             SinkAction::NameAdded {
                 space,
                 entity_id,
                 name,
-            } => entities::upsert_name(db, entity_id, name, sender).await,
-
+            } => entities::upsert_name(db, entity_id, name, sender).await?,
             SinkAction::ValueTypeAdded {
                 space,
                 entity_id,
                 attribute_id,
                 value_type,
-            } => Ok(()),
+            } => {}
 
             SinkAction::SubspaceAdded {
                 parent_space,
                 child_space,
-            } => Ok(()),
+            } => {}
 
             SinkAction::SubspaceRemoved {
                 parent_space,
                 child_space,
-            } => Ok(()),
+            } => {}
 
             SinkAction::TripleAdded {
                 space,
                 entity_id,
                 attribute_id,
                 value,
-            } => triples::create(db, entity_id, attribute_id, value, space, sender).await,
-
+                author,
+            } => triples::create(db, entity_id, attribute_id, value, space, author, sender).await?,
             SinkAction::TripleDeleted {
                 space,
                 entity_id,
                 attribute_id,
                 value,
-            } => triples::delete(db, entity_id, attribute_id, value, space).await,
+                author,
+            } => {} //triples::delete(db, entity_id, attribute_id, value, space, author, sender).await,
 
-            SinkAction::EntityCreated { space, entity_id } => {
-                entities::create(db, entity_id, space, sender).await
-            }
-        }
+            SinkAction::EntityCreated {
+                space, entity_id, ..
+            } => entities::create(db, entity_id, space, sender).await?,
+        };
+        Ok(())
     }
 }

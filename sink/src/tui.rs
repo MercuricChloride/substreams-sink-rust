@@ -55,15 +55,13 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 
 /// A function that returns a join handler for the gui thread
 /// If the use_gui flag is set to false, this function will return a dummy thread
-pub fn tui_handle(lock: Arc<RwLock<GuiData>>, use_gui: bool) -> JoinHandle<()> {
+pub async fn tui_handle(lock: Arc<RwLock<GuiData>>, use_gui: bool) -> Result<(), Error> {
     if use_gui {
-        tokio::task::spawn(async move {
-            let mut terminal = setup_terminal().unwrap();
-            run(&mut terminal, lock).await;
-            restore_terminal(&mut terminal);
-            exit(0)
-        })
+        let mut terminal = setup_terminal().unwrap();
+        run(&mut terminal, lock).await;
+        restore_terminal(&mut terminal)?;
+        exit(0)
     } else {
-        tokio::task::spawn(async move {})
+        Ok(())
     }
 }

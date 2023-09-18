@@ -10,7 +10,12 @@ use ratatui::{
     widgets::{block::Position, *},
 };
 
-use std::{io::Stdout, sync::Arc, thread};
+use std::{
+    io::Stdout,
+    sync::Arc,
+    thread,
+    time::{Duration, SystemTime},
+};
 
 use tokio::{spawn, sync::RwLock, task::JoinHandle};
 
@@ -75,6 +80,7 @@ impl<T> StatefulList<T> {
 }
 
 pub struct GuiData {
+    pub sink_start_time: SystemTime,
     pub start_block: u64,
     pub stop_block: u64,
     pub block_number: u64,
@@ -86,6 +92,7 @@ pub struct GuiData {
 
 pub fn ui(f: &mut Frame<CrosstermBackend<Stdout>>, app: &GuiData) -> Result<(), Error> {
     let GuiData {
+        sink_start_time,
         start_block,
         stop_block,
         block_number,
@@ -155,6 +162,12 @@ pub fn ui(f: &mut Frame<CrosstermBackend<Stdout>>, app: &GuiData) -> Result<(), 
         .percent(percent as u16);
     f.render_widget(gauge, size);
 
+    let bottom_split = Layout::default()
+        .direction(Direction::Horizontal)
+        .margin(1)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
+        .split(chunks[3]);
+
     // // The event list doesn't have any state and only displays the current state of the list.
     let task_list = app
         .tasks
@@ -179,7 +192,7 @@ pub fn ui(f: &mut Frame<CrosstermBackend<Stdout>>, app: &GuiData) -> Result<(), 
         .collect::<Vec<_>>();
 
     // Show the tasks
-    let size = chunks[3];
+    let size = bottom_split[0];
     let task_widget =
         List::new(task_list).block(Block::default().borders(Borders::ALL).title("Tasks"));
     f.render_widget(task_widget, size);
@@ -192,35 +205,67 @@ pub fn ui(f: &mut Frame<CrosstermBackend<Stdout>>, app: &GuiData) -> Result<(), 
         .bg(bg)
         .borders(Borders::NONE);
     f.render_widget(block, size);
+
+    let time_elapsed = SystemTime::now().duration_since(*sink_start_time).unwrap();
+    let actions_per_second = if time_elapsed.as_secs() == 0 {
+        0
+    } else {
+        task_count / time_elapsed.as_secs()
+    };
+
+    let format_time = |time: Duration| {
+        let secs = time.as_secs();
+        let mins = secs / 60;
+        let hours = mins / 60;
+        let days = hours / 24;
+        format!(
+            "{:02}:{:02}:{:02}:{:02}",
+            days,
+            hours % 24,
+            mins % 60,
+            secs % 60
+        )
+    };
+
+    let size = bottom_split[1];
+    let block = Block::default()
+        .title(format!(
+            "Time elapsed: {:?}, Average Actions / Second: {}",
+            format_time(time_elapsed),
+            actions_per_second
+        ))
+        .title_alignment(Alignment::Center)
+        .title_position(Position::Bottom)
+        .borders(Borders::NONE);
+
+    f.render_widget(block, size);
     Ok(())
 }
 
 /// A function that returns a join handler for the controls thread
 /// This thread handles the keyboard input
-pub fn controls_handle(lock: Arc<RwLock<GuiData>>) -> JoinHandle<()> {
-    spawn(async move {
-        loop {
-            let event = event::read().unwrap();
-            match event {
-                Event::Key(key) => {
-                    let key_pressed = key.code;
-                    match key_pressed {
-                        KeyCode::Char('q') => {
-                            let mut controls = lock.write().await;
-                            controls.should_quit = true;
-                            drop(controls);
-                            break;
-                        }
-                        KeyCode::Char('j') => {
-                            let mut controls = lock.write().await;
-                            controls.tasks.next();
-                            drop(controls);
-                        }
-                        _ => {}
+pub async fn controls_handle(lock: Arc<RwLock<GuiData>>) -> Result<(), Error> {
+    loop {
+        let event = event::read().unwrap();
+        match event {
+            Event::Key(key) => {
+                let key_pressed = key.code;
+                match key_pressed {
+                    KeyCode::Char('q') => {
+                        let mut controls = lock.write().await;
+                        controls.should_quit = true;
+                        drop(controls);
+                        return Ok(());
                     }
+                    KeyCode::Char('j') => {
+                        let mut controls = lock.write().await;
+                        controls.tasks.next();
+                        drop(controls);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+            _ => {}
         }
-    })
+    }
 }
