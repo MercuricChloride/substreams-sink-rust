@@ -9,6 +9,8 @@ pub struct Model {
     pub id: i32,
     #[sea_orm(column_type = "Text")]
     pub cursor: String,
+    #[sea_orm(column_type = "Text")]
+    pub block_number: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

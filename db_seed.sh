@@ -7,4 +7,4 @@
 
 #psql -h $host -U $username -d $dbname -a -f schema.sql
 export PGPASSWORD=fart
-psql -h localhost -U postgres -d postgres -a -f schema.sql
+psql -h localhost -U postgres -d geo-example -a -f schema.sql

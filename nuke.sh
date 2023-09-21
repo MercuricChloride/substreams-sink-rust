@@ -14,5 +14,5 @@ drop_sql=$(psql -h localhost -U postgres -d postgres -t -c "SELECT 'DROP TABLE I
 # Execute the SQL statements
 IFS=$'\n'
 for sql in $drop_sql; do
-  psql -h localhost -U postgres -d postgres -c "$sql"
+  psql -h localhost -U postgres -d geo-example -c "$sql"
 done

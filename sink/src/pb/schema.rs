@@ -20,8 +20,4 @@ pub struct EntriesAdded {
     #[prost(message, repeated, tag="1")]
     pub entries: ::prost::alloc::vec::Vec<EntryAdded>,
 }
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Action {
-}
 // @@protoc_insertion_point(module)

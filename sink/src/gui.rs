@@ -230,9 +230,9 @@ pub fn ui(f: &mut Frame<CrosstermBackend<Stdout>>, app: &GuiData) -> Result<(), 
     let size = bottom_split[1];
     let block = Block::default()
         .title(format!(
-            "Time elapsed: {:?}, Average Actions / Second: {}",
+            "Time elapsed: {:?}, Blocks Processed: {}",
             format_time(time_elapsed),
-            actions_per_second
+            block_number - start_block
         ))
         .title_alignment(Alignment::Center)
         .title_position(Position::Bottom)

@@ -1,6 +1,11 @@
+use futures03::{
+    future::try_join_all,
+    stream::{FuturesOrdered, FuturesUnordered},
+    StreamExt,
+};
 use sea_orm_migration::{
     prelude::*,
-    sea_orm::{DatabaseBackend, Statement},
+    sea_orm::{DatabaseBackend, DbBackend, Statement},
 };
 
 macro_rules! drop_table {
@@ -39,6 +44,7 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(Cursors::Cursor).text().not_null())
+                    .col(ColumnDef::new(Cursors::BlockNumber).text())
                     .to_owned(),
             )
             .await?;
@@ -312,10 +318,90 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        let root_space_query =
+            format!("CREATE SCHEMA IF NOT EXISTS \"0x170b749413328ac9a94762031a7a05b00c1d2e34\";");
+
+        let table_query =
+            format!("CREATE TABLE IF NOT EXISTS \"0x170b749413328ac9a94762031a7a05b00c1d2e34\".\"FOO\" (id text);");
+
+        let bootstrap_root_space =
+            format!("INSERT INTO \"public\".\"spaces\" (\"id\", \"address\", \"is_root_space\") VALUES ('root_space', '0x170b749413328ac9a94762031a7a05b00c1d2e34', true);");
+
+        connection
+            .execute(Statement::from_string(
+                DatabaseBackend::Postgres,
+                root_space_query,
+            ))
+            .await?;
+
+        connection
+            .execute(Statement::from_string(
+                DatabaseBackend::Postgres,
+                table_query,
+            ))
+            .await?;
+
+        connection
+            .execute(Statement::from_string(
+                DatabaseBackend::Postgres,
+                bootstrap_root_space,
+            ))
+            .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // NOTE
+        // THIS MIGRATION IS HEAVY
+        // YOU WILL PROBABLY NEED TO INCREASE MAX_LOCKS_PER_TX IN YOUR POSTGRES CONFIG
+        let schemas = manager
+            .get_connection()
+            .query_all(Statement::from_string(
+                DatabaseBackend::Postgres,
+                "SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE '0x%'",
+            ))
+            .await?;
+
+        let mut table_drops = Vec::new();
+        let mut futures = Vec::new();
+
+        for schema in schemas {
+            let schema_name = schema.try_get_by_index::<String>(0).unwrap();
+            let tables = manager
+                .get_connection()
+                .query_all(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    format!("SELECT table_name FROM information_schema.tables WHERE table_schema = '{}'", schema_name),
+                ))
+                .await?;
+
+            for table in tables {
+                let table_name = table.try_get_by_index::<String>(0).unwrap();
+                println!("Dropping table {}", table_name);
+                let query = format!(
+                    "DROP TABLE IF EXISTS \"{}\".\"{}\";",
+                    schema_name, table_name
+                );
+                table_drops.push(
+                    manager
+                        .get_connection()
+                        .execute(Statement::from_string(DatabaseBackend::Postgres, query)),
+                );
+            }
+
+            println!("Dropping schema {}", schema_name);
+            let query = format!("DROP SCHEMA IF EXISTS \"{}\";", schema_name);
+            futures.push(
+                manager
+                    .get_connection()
+                    .execute(Statement::from_string(DatabaseBackend::Postgres, query)),
+            );
+        }
+
+        try_join_all(table_drops).await?;
+        try_join_all(futures).await?;
+
         drop_tables!(
             manager,
             Cursors,
@@ -331,6 +417,7 @@ impl MigrationTrait for Migration {
             Actions,
             Versions
         );
+
         Ok(())
     }
 }
@@ -340,6 +427,7 @@ enum Cursors {
     Table,
     Id,
     Cursor,
+    BlockNumber,
 }
 
 #[derive(DeriveIden)]

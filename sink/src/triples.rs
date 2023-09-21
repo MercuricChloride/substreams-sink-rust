@@ -22,12 +22,16 @@
 
 use anyhow::Error;
 use base64::{engine::general_purpose, Engine as _};
-use futures03::future::{join_all, try_join_all};
+use futures03::{
+    future::{join_all, try_join_all},
+    stream::FuturesUnordered,
+};
 use migration::DbErr;
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
+use tokio_stream::StreamExt;
 
 use crate::{
     constants::Attributes,
@@ -62,13 +66,17 @@ impl Action {
         &self,
         db: &DatabaseConnection,
         sender: &Sender<String>,
-    ) -> Result<(), DbErr> {
-        try_join_all(
+    ) -> Result<(), Error> {
+        let mut entry_futures = FuturesUnordered::from_iter(
             self.actions
                 .iter()
                 .map(|action_triple| action_triple.execute(db, sender)),
-        )
-        .await?;
+        );
+
+        while let Some(result) = entry_futures.next().await {
+            result?;
+        }
+
         Ok(())
     }
 
@@ -76,9 +84,16 @@ impl Action {
         &self,
         db: &DatabaseConnection,
         sender: &Sender<String>,
-    ) -> Result<(), DbErr> {
+    ) -> Result<(), Error> {
         let author_address = self.author.clone();
-        accounts::create(db, author_address, sender).await
+        let mut futures = FuturesUnordered::new();
+        futures.push(accounts::create(db, author_address, sender));
+
+        while let Some(result) = futures.next().await {
+            result?;
+        }
+
+        Ok(())
     }
 
     /// This function returns a vector of all the sink actions that should be handled in this action.
@@ -243,8 +258,9 @@ impl ActionTriple {
         &self,
         db: &DatabaseConnection,
         sender: &Sender<String>,
-    ) -> Result<(), DbErr> {
-        actions::create(db, self, sender).await
+    ) -> Result<(), Error> {
+        actions::create(db, self, sender).await?;
+        Ok(())
     }
 
     pub fn action_type(&self) -> &'static str {
