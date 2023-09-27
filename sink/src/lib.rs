@@ -1,6 +1,7 @@
 use anyhow::{format_err, Context, Error};
 use clap::Parser;
 use crossterm::event::{Event, KeyCode, KeyEventKind};
+use dotenv::dotenv;
 use futures03::future::try_join_all;
 use futures03::stream::{FuturesOrdered, FuturesUnordered};
 use futures03::{future::join_all, StreamExt};
@@ -17,6 +18,7 @@ use sea_orm::{ActiveValue, ConnectOptions, DatabaseTransaction, TransactionTrait
 use prost::Message;
 use sea_orm::{Database, DatabaseConnection, EntityTrait};
 use sea_query::OnConflict;
+use sink_actions::SinkAction;
 use tokio::sync::mpsc::{self, channel, unbounded_channel, Receiver, Sender, UnboundedSender};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -44,8 +46,11 @@ use crate::pb::schema::EntriesAdded;
 use crate::sink_actions::handle_sink_actions;
 use crate::triples::Action;
 
+use commands::Args;
+
 use models::cursor;
 
+mod commands;
 pub mod constants;
 pub mod gui;
 pub mod models;
@@ -57,51 +62,16 @@ mod substreams_stream;
 mod triples;
 pub mod tui;
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-pub struct Args {
-    /// Substreams endpoint
-    #[arg(short, long)]
-    #[clap(index = 1)]
-    substreams_endpoint: String,
-
-    /// Path or link to spkg
-    #[arg(short, long)]
-    #[clap(index = 2)]
-    spkg: String,
-
-    /// Module name
-    #[arg(short, long)]
-    #[clap(index = 3)]
-    module: String,
-
-    /// Postgres host
-    #[arg(short, long)]
-    host: String,
-
-    /// Postgres username
-    #[arg(short, long)]
-    username: String,
-
-    /// Postgres password
-    #[arg(short, long)]
-    password: String,
-
-    /// Postgres port, default 5432
-    #[arg(short, long, default_value = "5432")]
-    port: String,
-
-    /// Substreams API token, if not provided, SUBSTREAMS_API_TOKEN environment variable will be used
-    #[arg(short, long, env = "SUBSTREAMS_API_TOKEN")]
-    token: String,
-
-    /// Whether or not to use the GUI
-    #[arg(short, long)]
-    gui: bool,
-}
+pub const MAX_CONNECTIONS: usize = 499;
 
 pub async fn main() -> Result<(), Error> {
+    // load the .env file
+    dotenv().expect(
+        "Couldn't load .env file, please make sure it exists in the root directory of the project.",
+    );
+
     let Args {
+        command,
         substreams_endpoint: endpoint_url,
         spkg: package_file,
         module: module_name,
@@ -109,55 +79,27 @@ pub async fn main() -> Result<(), Error> {
         host,
         username,
         password,
-        port,
+        database,
         gui,
     } = Args::parse();
 
     let start_block = 36472425;
-    let stop_block = 46904315;
+    let stop_block = 47942548;
     //let stop_block = 36473425;
-
-    let gui_data_lock = Arc::new(RwLock::new(GuiData {
-        sink_start_time: SystemTime::now(),
-        start_block,
-        stop_block,
-        block_number: 0,
-        information_in_block: false,
-        tasks: StatefulList::with_items(vec![]),
-        task_count: 0,
-        should_quit: false,
-    }));
 
     let package = read_package(&package_file).await?;
     let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, Some(token)).await?);
 
-    let mut opt = ConnectOptions::new(format!("postgres://{username}:{password}@{host}/postgres"));
-    opt.max_connections(499)
-        .max_lifetime(Duration::from_secs(60))
-        .connect_timeout(Duration::from_secs(60));
-    let (message_sender, mut message_receiver) = channel(499); // 499 is the max number of connections
+    // the reason for the long timeout is because any interactions with the db will be blocking if the db can't
+    // handle any more connections at once.
+    let mut connection_options = ConnectOptions::new(format!(
+        "postgres://{username}:{password}@{host}/{database}"
+    ));
+    connection_options.max_connections(MAX_CONNECTIONS as u32);
 
-    // spawn a task to handle messages
-    let gui_data_lock_clone = gui_data_lock.clone();
-    let message_task = tokio::spawn(async move {
-        while let Some(response) = message_receiver.recv().await {
-            if !gui {
-                //if response.starts_with("CREATE") {
-                //println!("{}", response);
-                //}
-                println!("{}", response);
-            } else {
-                let mut gui_data = gui_data_lock_clone.write().await;
-                gui_data.tasks.push(response);
-                gui_data.task_count += 1;
-                drop(gui_data);
-            }
-        }
-    });
+    let db: Arc<DatabaseConnection> = Arc::new(Database::connect(connection_options).await?);
 
-    let db: Arc<DatabaseConnection> = Arc::new(Database::connect(opt).await?);
-
-    let cursor: Option<String> = cursor::get(&db, &message_sender).await?;
+    let cursor: Option<String> = cursor::get(&db).await?;
 
     let mut stream = SubstreamsStream::new(
         endpoint.clone(),
@@ -169,283 +111,162 @@ pub async fn main() -> Result<(), Error> {
         stop_block,
     );
 
-    //let mut futures = Arc::new(RwLock::new(FuturesOrdered::new()));
-    // we need to be able to respond to user input while the stream is running
-    // ie close the stream and exit the program
-    if gui {
-        // let task_clone = gui_data_lock.clone();
-        // let tui_task_clone = gui_data_lock.clone();
-        // let controls_clone = gui_data_lock.clone();
-        // let db_clone = gui_data_lock.clone();
-        // let (sender, mut receiver) = unbounded_channel();
+    if !gui {
+        // spawn a concurrent process to handle the substream data
+        let (tx, mut rx) = channel::<Action>(200);
 
-        // // spawn a concurrent process to handle the responses from the stream
-        // let db_task = tokio::spawn(async move {
-        //     let mut futures = FuturesUnordered::new();
-        //     while let Some(join_handle) = receiver.recv().await {
-        //         match join_handle {
-        //             Some(join_handle) => {
-        //                 futures.push(join_handle);
-        //             }
-        //             None => {
-        //                 receiver.close();
-        //             }
-        //         }
-        //     }
+        let receiver_task = async {
+            let mut start;
+            while let Some(action) = rx.recv().await {
+                let db = db.clone();
+                start = Instant::now();
+                println!("Processing entry");
 
-        //     while let Some(result) = futures.next().await {
-        //         match result {
-        //             Ok(_) => {}
-        //             Err(err) => {
-        //                 let mut gui_data = db_clone.write().await;
-        //                 gui_data.tasks.push(format!("Error: {}", err));
-        //                 gui_data.should_quit = true;
-        //                 drop(gui_data);
-
-        //                 // close the receiver channel so we exit on an error
-        //                 receiver.close();
-        //                 break;
-        //             }
-        //         }
-        //     }
-        // });
-        // // spawn a concurrent process to handle the GUI
-        // let tui = tokio::spawn(tui_handle(tui_task_clone, gui));
-        // // spawn a concurrent process to handle the user input
-        // let controls = tokio::spawn(controls_handle(controls_clone));
-        // // spawn a concurrent process to handle the substream data
-        // let stream_task = tokio::spawn(async move {
-        //     loop {
-        //         let stream_task_clone = task_clone.clone();
-        //         let reader = stream_task_clone.read().await;
-        //         // if the signal is to quit, close the stream
-        //         if reader.should_quit {
-        //             sender.send(None)?;
-        //             return Ok(());
-        //         }
-        //         drop(reader);
-
-        //         match stream.next().await {
-        //             None => {
-        //                 sender.send(None)?;
-        //                 return Err(Error::msg("Stream consumed"));
-        //             }
-        //             Some(Ok(BlockResponse::New(data))) => {
-        //                 let future = tokio::spawn(process_block_scoped_data(
-        //                     data,
-        //                     db.clone(),
-        //                     stream_task_clone,
-        //                     gui,
-        //                 ));
-        //                 sender.send(Some(future))?;
-        //             }
-        //             Some(Ok(BlockResponse::Undo(undo_signal))) => {
-        //                 process_block_undo_signal(&undo_signal).unwrap();
-        //             }
-        //             Some(Err(err)) => {
-        //                 println!();
-        //                 println!("Stream terminated with error");
-        //                 println!("{:?}", err);
-        //             }
-        //         }
-        //     }
-        // });
-
-        // let res = try_join!(stream_task, tui, controls, db_task);
-
-        // match res {
-        //     Ok(_) => Ok(()),
-        //     Err(err) => {
-        //         message_task.abort();
-        //         Err(err.into())
-        //     }
-        // }
-        todo!("need to fix gui");
-    } else {
-        let task_clone = gui_data_lock.clone();
-        let (sender, mut receiver) = channel(5); // the number of concurrent blocks to run at once
-
-        // spawn a concurrent process to handle the responses from the stream
-        let db_task = async {
-            while let Some(future) = receiver.recv().await {
-                match future {
-                    Some(future) => {
-                        future.await?;
+                let result = match &command {
+                    commands::Commands::Deploy { spaces } => {
+                        handle_action(action, db.clone()).await
                     }
-                    None => {
-                        println!("Stream consumed");
-                        receiver.close();
+                    commands::Commands::DeployGlobal { root_space_address } => {
+                        handle_global_action(action, db.clone()).await
                     }
+                };
+
+                if let Err(err) = result {
+                    println!("Error processing entry: {:?}", err);
+                    return Err(Error::from(err));
                 }
+
+                println!("Entry processed in {:?}", start.elapsed());
             }
             Ok(())
         };
 
-        // spawn a concurrent process to handle the substream data
-        let stream_task = async move {
+        let stream_task = async {
+            let tx = tx;
             loop {
-                let stream_task_clone = task_clone.clone();
-                let reader = stream_task_clone.read().await;
-                // if the signal is to quit, close the stream
-                if reader.should_quit {
-                    sender.send(None).await.unwrap();
-                    return Ok(());
-                }
-                drop(reader);
-
                 match stream.next().await {
                     None => {
                         println!("Stream consumed");
-                        if let Err(err) = sender.send(None).await {
-                            println!("Error sending to channel: {:?}", err);
-                        }
-                        return Ok(());
+                        break;
                     }
                     Some(Ok(BlockResponse::New(data))) => {
-                        let future = process_block_scoped_data(
-                            data,
-                            db.clone(),
-                            stream_task_clone,
-                            gui,
-                            message_sender.clone(),
-                        );
-
-                        if let Err(err) = sender.send(Some(future)).await {
-                            println!("Error sending to channel: {:?}", err);
+                        if let Some(output) = &data.output {
+                            if let Some(map_output) = &output.map_output {
+                                let block_number = data.clock.as_ref().unwrap().number;
+                                let value = EntriesAdded::decode(map_output.value.as_slice())?;
+                                // if the block is empty, store the cursor and set the flag to false
+                                if value.entries.len() == 0 {
+                                    cursor::store(&db, data.cursor.clone(), block_number).await?;
+                                } else {
+                                    println!(
+                                        "Processing block {}, {} entries to process.",
+                                        block_number,
+                                        value.entries.len()
+                                    );
+                                    process_block_scoped_data(value, data, db.clone(), &tx).await?;
+                                }
+                            }
                         }
                     }
                     Some(Ok(BlockResponse::Undo(undo_signal))) => {
                         process_block_undo_signal(&undo_signal).unwrap();
                     }
                     Some(Err(err)) => {
-                        println!();
                         println!("Stream terminated with error");
                         println!("{:?}", err);
                         return Err(Error::msg(err));
                     }
                 }
             }
+            Ok(())
         };
 
-        let res = try_join!(stream_task, db_task);
+        let res = try_join!(stream_task, receiver_task);
 
         match res {
-            Ok(_) => {
-                message_task.abort();
-                Ok(())
-            }
-            Err(err) => {
-                message_task.abort();
-                Err(err.into())
-            }
+            Ok(_) => Ok(()),
+            Err(err) => Err(err.into()),
         }
+    } else {
+        todo!("need to fix gui");
+        // TODO Add the message handler back if it is appropriate
+        // spawn a task to handle messages
+        // let gui_data_lock_clone = gui_data_lock.clone();
+        // let message_task = tokio::spawn(async move {
+        //     while let Some(response) = message_receiver.recv().await {
+        //         if !gui {
+        //             //if response.starts_with("CREATE") {
+        //             //println!("{}", response);
+        //             //}
+        //             println!("{}", response);
+        //         } else {
+        //             let mut gui_data = gui_data_lock_clone.write().await;
+        //             gui_data.tasks.push(response);
+        //             gui_data.task_count += 1;
+        //             drop(gui_data);
+        //         }
+        //     }
+        // });
     }
 }
 
 async fn process_block_scoped_data(
+    value: EntriesAdded,
     data: BlockScopedData,
     db: Arc<DatabaseConnection>,
-    gui_data_lock: Arc<RwLock<GuiData>>,
-    use_gui: bool,
-    sender: Sender<String>,
+    sender: &Sender<Action>,
 ) -> Result<(), Error> {
-    if let Some(output) = &data.output {
-        if let Some(map_output) = &output.map_output {
-            let value = EntriesAdded::decode(map_output.value.as_slice())?;
-            let mut gui_data = gui_data_lock.write().await;
+    let entries = value.entries;
+    let block_number = data.clock.as_ref().unwrap().number;
 
-            let block_number = data.clock.as_ref().unwrap().number;
-            gui_data.block_number = block_number;
-
-            if value.entries.len() == 0 {
-                // println!("Empty Block #{}:", data.clock.as_ref().unwrap().number);
-                cursor::store(&db, data.cursor, block_number, &sender).await?;
-                gui_data.information_in_block = false;
-                return Ok(());
+    println!("Getting actions for block {}", block_number);
+    let actions = join_all(entries.iter().map(Action::decode_from_entry)).await;
+    println!("Actions retrieved");
+    for action in actions.into_iter() {
+        match action {
+            Ok(action) => sender.send(action).await?,
+            Err(err) => {
+                println!("Error getting action: {:?}", err);
+                continue;
             }
-            gui_data.information_in_block = true;
-            drop(gui_data);
-
-            //let (tx, mut rx) = channel(499);
-
-            let entries = value.entries;
-
-            let mut entry_futures = FuturesUnordered::from_iter(
-                entries
-                    .iter()
-                    .map(|entry| handle_entry(&entry, db.clone(), sender.clone())),
-            );
-
-            // let message_task = tokio::spawn(async move {
-            //     while let Some(response) = rx.recv().await {
-            //         if !use_gui {
-            //             //if response.starts_with("CREATE") {
-            //             //println!("{}", response);
-            //             //}
-            //             println!("{}", response);
-            //         } else {
-            //             let mut gui_data = gui_data_lock.write().await;
-            //             gui_data.tasks.push(response);
-            //             gui_data.task_count += 1;
-            //             drop(gui_data);
-            //         }
-            //     }
-            // });
-
-            cursor::store(&db, data.cursor, block_number, &sender).await?;
-
-            while let Some(entry) = entry_futures.next().await {
-                match entry {
-                    Ok(_) => {}
-                    Err(err) => {
-                        return Err(Error::msg(err));
-                    }
-                }
-            }
-
-            drop(sender);
         }
     }
+    println!("Actions sent");
+
+    cursor::store(&db, data.cursor, block_number).await?;
 
     Ok(())
 }
 
-async fn handle_entry(
-    entry: &EntryAdded,
-    db: Arc<DatabaseConnection>,
-    sender: Sender<String>,
-) -> Result<(), Error> {
-    let action = Action::decode_from_entry(entry).await?;
-    let sink_actions = action.clone().get_sink_actions();
+// This function should only use a single connection to the database
+// We might want to make this function more concurrent, but we will see.
+async fn handle_action(action: Action, db: Arc<DatabaseConnection>) -> Result<(), Error> {
+    action.execute_action_triples(&db).await?;
+    println!("Action triples added to db");
 
-    let sender_clone = sender.clone();
-    let action_clone = action.clone();
-    let db_clone = db.clone();
-    let task_one = async move {
-        let mut futures = FuturesUnordered::new();
-        // we need to add the action triples to the database before we can handle the sink actions
-        futures.push(action_clone.execute_action_triples(&db_clone, &sender_clone));
+    action.add_author_to_db(&db).await?;
+    println!("Author added to db");
 
-        while let Some(result) = futures.next().await {
-            match result {
-                Ok(_) => {}
-                Err(err) => {
-                    return Err(err);
-                }
-            }
-        }
+    let sink_actions = action.get_sink_actions();
+    handle_sink_actions(sink_actions, &db).await?;
+    println!("Sink actions handled");
 
-        Ok(())
-    };
+    Ok(())
+}
 
-    let sender_clone = sender.clone();
-    let db_clone = db.clone();
+/// This function is very similar to `handle_action`, however it is used to only perform the actions
+/// for running the global, stripped down version of the sink.
+/// So it operates on different sink actions etc.
+async fn handle_global_action(action: Action, db: Arc<DatabaseConnection>) -> Result<(), Error> {
+    //action.execute_action_triples(&db).await?;
+    //println!("Action triples added to db");
 
-    let task_two = async move { handle_sink_actions(sink_actions, &db_clone, &sender_clone).await };
+    action.add_author_to_db(&db).await?;
+    println!("Author added to db");
 
-    let task_three = async move { action.add_author_to_db(&db, &sender).await };
-
-    try_join!(task_one, task_two, task_three)?;
+    let sink_actions = action.get_sink_actions();
+    handle_sink_actions(sink_actions, &db).await?;
+    println!("Sink actions handled");
 
     Ok(())
 }

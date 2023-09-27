@@ -5,7 +5,6 @@ use std::process::exit;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
 
 use crossterm::{
     execute,

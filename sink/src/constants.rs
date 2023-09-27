@@ -9,8 +9,11 @@ pub enum Attributes {
     Attribute,
     Space,
     Name,
+    Description,
     ValueType,
     Subspace,
+    Cover,
+    Avatar,
 }
 
 impl Attributes {
@@ -21,8 +24,11 @@ impl Attributes {
             Attributes::Attribute => "01412f83-8189-4ab1-8365-65c7fd358cc1",
             Attributes::Space => "space",
             Attributes::Name => "name",
+            Attributes::Description => "Description",
             Attributes::ValueType => "ee26ef23-f7f1-4eb6-b742-3b0fa38c1fd8",
             Attributes::Subspace => "442e1850-9de7-4002-a065-7bc8fcff2514",
+            Attributes::Avatar => "235ba0e8-dc7e-4bdd-a1e1-6d0d4497f133",
+            Attributes::Cover => "34f53507-2e6b-42c5-a844-43981a77cfa2",
         }
     }
 
@@ -32,8 +38,11 @@ impl Attributes {
             Attributes::Attribute => "Attribute",
             Attributes::Space => "Space",
             Attributes::Name => "Name",
+            Attributes::Description => "Description",
             Attributes::ValueType => "ValueType",
             Attributes::Subspace => "Subspace",
+            Attributes::Avatar => "Avatar",
+            Attributes::Cover => "Cover",
         }
     }
 }

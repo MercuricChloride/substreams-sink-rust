@@ -6,7 +6,7 @@ use sea_orm::{DatabaseConnection, DatabaseTransaction};
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio_stream::StreamExt;
 
-use crate::triples::ValueType;
+use crate::triples::{ActionTriple, ValueType};
 
 use crate::models::*;
 
@@ -82,6 +82,19 @@ pub enum SinkAction {
         name: String,
     },
 
+    /// We care about a description being added to an entity
+    DescriptionAdded {
+        space: String,
+        entity_id: String,
+        description: String,
+    },
+    /// Covers can be added to spaces, this is the cover image for the webpage
+    CoverAdded {
+        space: String,
+        entity_id: String,
+        cover_image: String,
+    },
+
     /// We care about a ValueType being added to an entity because we need this when adding attributes to a type in the graph.
     ValueTypeAdded {
         space: String,
@@ -129,41 +142,55 @@ pub enum SinkAction {
 }
 
 pub async fn handle_sink_actions(
-    sink_actions: Vec<SinkAction>,
+    sink_actions: Vec<(SinkAction, Option<SinkAction>)>,
     db: &DatabaseConnection,
-    sender: &Sender<String>,
 ) -> Result<(), Error> {
-    let mut futures = FuturesOrdered::from_iter(
-        sink_actions
-            .into_iter()
-            .map(|action| action.execute(db, sender)),
-    );
+    let mut futures = FuturesUnordered::new();
+    let mut chunk = Vec::new();
+    for (default_action, optional_action) in sink_actions {
+        // if there is an optional action, we need to execute it
+        if let Some(action) = optional_action {
+            chunk.push(action.execute(db));
+
+            if chunk.len() == crate::MAX_CONNECTIONS {
+                futures.push(try_join_all(chunk));
+                chunk = Vec::new();
+            }
+        }
+
+        chunk.push(default_action.execute(db));
+        if chunk.len() == crate::MAX_CONNECTIONS {
+            futures.push(try_join_all(chunk));
+            chunk = Vec::new();
+        }
+    }
+
+    if !chunk.is_empty() {
+        futures.push(try_join_all(chunk));
+    }
 
     while let Some(result) = futures.next().await {
         result?;
     }
+
     Ok(())
 }
 
 impl SinkAction {
-    pub async fn execute(
-        self,
-        db: &DatabaseConnection,
-        sender: &Sender<String>,
-    ) -> Result<(), DbErr> {
+    pub async fn execute(self, db: &DatabaseConnection) -> Result<(), DbErr> {
         match self {
             SinkAction::SpaceCreated { entity_id, space } => {
                 let space = space.to_lowercase();
-                spaces::create_schema(db, &space, sender).await?;
-                spaces::create(db, entity_id, space, sender).await?
+                spaces::create_schema(db, &space).await?;
+                spaces::create(db, entity_id, space).await?
             }
 
             SinkAction::TypeCreated { entity_id, space } => {
                 let space = space.to_lowercase();
                 // make the entity a type in the global schema
-                entities::upsert_is_type(db, entity_id.clone(), true, sender).await?;
+                entities::upsert_is_type(db, entity_id.clone(), true).await?;
                 // create a table within the space schema for this type
-                entities::create_table(db, &entity_id, &space, sender).await?
+                entities::create_table(db, &entity_id, &space).await?
             }
 
             SinkAction::TypeAdded {
@@ -173,7 +200,7 @@ impl SinkAction {
             } => {
                 let space = space.to_lowercase();
                 // add the entity_id to the type_id table
-                entities::add_type(db, &entity_id, &type_id, sender).await?
+                entities::add_type(db, &entity_id, &type_id).await?
             }
 
             SinkAction::AttributeAdded {
@@ -185,9 +212,9 @@ impl SinkAction {
                 let space = space.to_lowercase();
                 let value_id = value.id().to_string();
                 // add the relation to the entity in the space schema
-                entities::add_relation(db, &entity_id, &value_id, &space, sender).await?;
+                entities::add_relation(db, &entity_id, &value_id, &space).await?;
                 // add the attribute to the entity in the global schema
-                entities::add_attribute(db, entity_id, value_id, sender).await?
+                entities::add_attribute(db, entity_id, value_id).await?
             }
 
             SinkAction::NameAdded {
@@ -197,7 +224,7 @@ impl SinkAction {
             } => {
                 let space = space.to_lowercase();
                 //TODO Update the table name to via a smart comment
-                entities::upsert_name(db, entity_id, name, sender).await?;
+                entities::upsert_name(db, entity_id, name).await?;
             }
 
             SinkAction::ValueTypeAdded {
@@ -229,21 +256,36 @@ impl SinkAction {
                 attribute_id,
                 value,
                 author,
-            } => triples::create(db, entity_id, attribute_id, value, space, author, sender).await?,
+            } => triples::create(db, entity_id, attribute_id, value, space, author).await?,
+
             SinkAction::TripleDeleted {
                 space,
                 entity_id,
                 attribute_id,
                 value,
                 author,
-            } => {} //triples::delete(db, entity_id, attribute_id, value, space, author, sender).await,
+            } => {} //triples::delete(db, entity_id, attribute_id, value, space, author).await,
 
             SinkAction::EntityCreated {
                 space, entity_id, ..
             } => {
                 let space = space.to_lowercase();
-                entities::create(db, entity_id, space, sender).await?
+                entities::create(db, entity_id, space).await?
             }
+
+            SinkAction::DescriptionAdded {
+                space,
+                entity_id,
+                description,
+            } => {
+                let space = space.to_lowercase();
+                entities::upsert_description(db, entity_id, description).await?
+            }
+            SinkAction::CoverAdded {
+                space,
+                entity_id,
+                cover_image,
+            } => todo!(),
         };
         Ok(())
     }

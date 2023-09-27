@@ -8,33 +8,31 @@ pub mod spaces {
     use sea_orm::{ActiveValue, DatabaseConnection, DbBackend, EntityTrait, Schema, Statement};
     use tokio::sync::mpsc::Sender;
 
-    pub async fn create_schema(
-        db: &DatabaseConnection,
-        schema_name: &String,
-        sender: &Sender<String>,
-    ) -> Result<(), DbErr> {
-        let message = format!("Creating schema {schema_name}");
-        sender.send(message).await.unwrap();
+    pub async fn create_schema(db: &DatabaseConnection, schema_name: &String) -> Result<(), DbErr> {
+        #[cfg(not(feature = "experimental_queries"))]
+        return Ok(());
+        //let message = format!("Creating schema {schema_name}");
+        //sender.send(message).await.unwrap();
 
         let schema_query = format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";");
 
         db.execute(Statement::from_string(DbBackend::Postgres, schema_query))
             .await?;
 
-        let message = format!("Creating table for {schema_name}");
-        sender.send(message).await.unwrap();
-        let table_query = format!("CREATE TABLE \"{schema_name}\".\"FOO\"(id text);");
+        //let message = format!("Creating table for {schema_name}");
+        //sender.send(message).await.unwrap();
+        let table_query = format!("CREATE TABLE IF NOT EXISTS\"{schema_name}\".\"FOO\"(id text);");
 
         db.execute(Statement::from_string(DbBackend::Postgres, table_query))
             .await?;
 
-        let message = format!("Inserting test data for table {schema_name}");
-        sender.send(message).await.unwrap();
+        //let message = format!("Inserting test data for table {schema_name}");
+        //sender.send(message).await.unwrap();
         let insert = format!("INSERT INTO \"{schema_name}\".\"FOO\" VALUES ('bar');");
         db.execute(Statement::from_string(DbBackend::Postgres, insert))
             .await?;
 
-        drop(sender);
+        //drop(sender);
         Ok(())
     }
 
@@ -42,7 +40,6 @@ pub mod spaces {
         db: &DatabaseConnection,
         space_id: String,
         address: String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         let space = ActiveModel {
             id: ActiveValue::Set(space_id.to_owned()),
@@ -50,9 +47,9 @@ pub mod spaces {
             ..Default::default()
         };
 
-        let message = format!("Creating space {}", space_id);
-        sender.send(message).await.unwrap();
-        drop(sender);
+        //let message = format!("Creating space {}", space_id);
+        //sender.send(message).await.unwrap();
+        //drop(sender);
 
         // create the space
         Entity::insert(space)
@@ -79,8 +76,9 @@ pub mod entities {
         db: &DatabaseConnection,
         entity_id: &String,
         space: &String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
+        #[cfg(not(feature = "experimental_queries"))]
+        return Ok(());
         let table_create_statement = format!(
             "CREATE TABLE IF NOT EXISTS \"{space}\".\"{entity_id}\" (
                 id TEXT PRIMARY KEY,
@@ -94,7 +92,7 @@ pub mod entities {
         //"Creating table for entity {} for space {}",
         //entity_id, space
         //);
-        sender.send(table_create_statement.clone()).await.unwrap();
+        //sender.send(table_create_statement.clone()).await.unwrap();
 
         db.execute(Statement::from_string(
             DbBackend::Postgres,
@@ -102,7 +100,7 @@ pub mod entities {
         ))
         .await?;
 
-        drop(sender);
+        //drop(sender);
         Ok(())
     }
 
@@ -114,13 +112,15 @@ pub mod entities {
         parent_entity: &String,
         child_entity: &String,
         space: &String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
-        let message = format!(
-            "Adding relation from child {} to parent {} for space {}",
-            child_entity, parent_entity, space
-        );
-        sender.send(message).await.unwrap();
+        // let message = format!(
+        //     "Adding relation from child {} to parent {} for space {}",
+        //     child_entity, parent_entity, space
+        // );
+        //sender.send(message).await.unwrap();
+
+        #[cfg(not(feature = "experimental_queries"))]
+        return Ok(());
 
         let column_add_statement = format!(
             "ALTER TABLE \"{space}\".\"{child_entity}\" ADD COLUMN IF NOT EXISTS \"parent_{parent_entity}\" TEXT REFERENCES \"{space}\".\"{parent_entity}\"(id);",
@@ -135,7 +135,7 @@ pub mod entities {
         ))
         .await?;
 
-        drop(sender);
+        //drop(sender);
         Ok(())
     }
 
@@ -145,10 +145,11 @@ pub mod entities {
         db: &DatabaseConnection,
         entity_id: &String,
         type_id: &String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
-        let message = format!("Checking if type {} exists", type_id);
-        sender.send(message).await.unwrap();
+        #[cfg(not(feature = "experimental_queries"))]
+        return Ok(());
+        //let message = format!("Checking if type {} exists", type_id);
+        //sender.send(message).await.unwrap();
         // grab the space the type is defined in
         let space = Entity::find_by_id(type_id.clone())
             .one(db)
@@ -157,8 +158,8 @@ pub mod entities {
             .defined_in
             .unwrap();
 
-        let message = format!("Adding type {} to entity {}", type_id, entity_id);
-        sender.send(message).await.unwrap();
+        //let message = format!("Adding type {} to entity {}", type_id, entity_id);
+        //sender.send(message).await.unwrap();
         let type_insert_statement = format!(
             "INSERT INTO \"{space}\".\"{type_id}\" (\"id\", \"entity_id\") VALUES ('{entity_id}', '{entity_id}');",
             space = space,
@@ -172,7 +173,7 @@ pub mod entities {
         ))
         .await?;
 
-        drop(sender);
+        //drop(sender);
         Ok(())
     }
 
@@ -180,14 +181,13 @@ pub mod entities {
         db: &DatabaseConnection,
         entity_id: String,
         space: String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         let message = format!("Checking if entity {} exists", entity_id);
-        sender.send(message).await.unwrap();
+        //sender.send(message).await.unwrap();
         let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
 
         if let Some(_) = entity {
-            drop(sender);
+            //drop(sender);
             return Ok(());
         }
 
@@ -199,14 +199,14 @@ pub mod entities {
             ..Default::default()
         };
 
-        sender.send(message).await.unwrap();
+        //sender.send(message).await.unwrap();
         Entity::insert(entity)
             .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
             .do_nothing()
             .exec(db)
             .await?;
 
-        drop(sender);
+        //drop(sender);
         Ok(())
     }
 
@@ -214,11 +214,10 @@ pub mod entities {
         db: &DatabaseConnection,
         entity_id: String,
         name: String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         let message = format!("Upserting name {} for entity {}", name, entity_id);
-        sender.send(message).await.unwrap();
-        drop(sender);
+        //sender.send(message).await.unwrap();
+        //drop(sender);
 
         let entity = ActiveModel {
             id: ActiveValue::Set(entity_id),
@@ -238,15 +237,42 @@ pub mod entities {
         Ok(())
     }
 
+    pub async fn upsert_description(
+        db: &DatabaseConnection,
+        entity_id: String,
+        description: String,
+    ) -> Result<(), DbErr> {
+        let message = format!(
+            "Upserting description {} for entity {}",
+            description, entity_id
+        );
+
+        let entity = ActiveModel {
+            id: ActiveValue::Set(entity_id),
+            description: ActiveValue::Set(Some(description)),
+            ..Default::default()
+        };
+
+        Entity::insert(entity)
+            .on_conflict(
+                OnConflict::column(Column::Id)
+                    .update_column(Column::Description)
+                    .to_owned(),
+            )
+            .exec(db)
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn upsert_is_type(
         db: &DatabaseConnection,
         entity_id: String,
         is_type: bool,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         let message = format!("Upserting is_type {} for entity {}", is_type, entity_id);
-        sender.send(message).await.unwrap();
-        drop(sender);
+        //sender.send(message).await.unwrap();
+        //drop(sender);
 
         let entity = ActiveModel {
             id: ActiveValue::Set(entity_id),
@@ -271,16 +297,16 @@ pub mod entities {
         db: &DatabaseConnection,
         entity_id: String,
         attribute_of_id: String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         let message = format!(
             "Adding attribute {} to entity {}",
             attribute_of_id, entity_id
         );
-        sender.send(message).await.unwrap();
-        drop(sender);
+        //sender.send(message).await.unwrap();
+        //drop(sender);
+        let id = uuid::Uuid::new_v4().to_string();
         let entity = entity_attributes::ActiveModel {
-            id: ActiveValue::Set(format!("{}-{}", entity_id, attribute_of_id)),
+            id: ActiveValue::Set(id),
             entity_id: ActiveValue::Set(entity_id),
             attribute_of: ActiveValue::Set(attribute_of_id),
         };
@@ -310,14 +336,13 @@ pub mod cursor {
         db: &DatabaseConnection,
         cursor_string: String,
         block_number: u64,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         let message = format!("Checking if cursor exists");
-        sender.send(message).await.unwrap();
+        //sender.send(message).await.unwrap();
         let cursor = cursors::Entity::find_by_id(0).one(db).await?;
         if let Some(_) = cursor {
             let message = format!("Updating cursor");
-            sender.send(message).await.unwrap();
+            //sender.send(message).await.unwrap();
             cursors::Entity::update(cursors::ActiveModel {
                 id: ActiveValue::Set(0),
                 cursor: ActiveValue::Set(cursor_string),
@@ -327,7 +352,7 @@ pub mod cursor {
             .await?;
         } else {
             let message = format!("Creating cursor");
-            sender.send(message).await.unwrap();
+            //sender.send(message).await.unwrap();
             let cursor = cursors::ActiveModel {
                 id: ActiveValue::Set(0),
                 cursor: ActiveValue::Set(cursor_string),
@@ -345,19 +370,16 @@ pub mod cursor {
                 .await?;
         }
 
-        drop(sender);
+        //drop(sender);
         Ok(())
     }
 
-    pub async fn get(
-        db: &DatabaseConnection,
-        sender: &Sender<String>,
-    ) -> Result<Option<String>, DbErr> {
+    pub async fn get(db: &DatabaseConnection) -> Result<Option<String>, DbErr> {
         let message = format!("Getting cursor");
-        sender.send(message).await.unwrap();
+        //sender.send(message).await.unwrap();
         let cursor = cursors::Entity::find_by_id(0).one(db).await?;
 
-        drop(sender);
+        //drop(sender);
         if let Some(cursor) = cursor {
             return Ok(Some(cursor.cursor));
         } else {
@@ -372,18 +394,10 @@ pub mod accounts {
     use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, InsertResult};
     use tokio::sync::mpsc::Sender;
 
-    pub async fn create(
-        db: &DatabaseConnection,
-        address: String,
-        sender: &Sender<String>,
-    ) -> Result<(), DbErr> {
+    pub async fn create(db: &DatabaseConnection, address: String) -> Result<(), DbErr> {
         let account = Entity::find_by_id(address.clone()).one(db).await?;
 
         if let None = account {
-            let message = format!("Creating account {}", address);
-            sender.send(message).await.unwrap();
-            drop(sender);
-
             let account = ActiveModel {
                 id: ActiveValue::Set(address.clone()),
                 ..Default::default()
@@ -394,10 +408,14 @@ pub mod accounts {
                 .do_nothing()
                 .exec(db)
                 .await?;
+
+            let message = format!("Creating account {}", address);
+            //sender.send(message).await.unwrap();
+            //drop(sender);
         } else {
             let message = format!("Account {} already existst", address);
-            sender.send(message).await.unwrap();
-            drop(sender);
+            //sender.send(message).await.unwrap();
+            //drop(sender);
         }
 
         Ok(())
@@ -420,12 +438,11 @@ pub mod triples {
         value: ValueType,
         space: String,
         author: String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         // create the entity and attribute if they don't exist
-        super::entities::create(db, entity_id.clone(), space.clone(), sender).await?;
+        super::entities::create(db, entity_id.clone(), space.clone()).await?;
 
-        super::entities::create(db, attribute_id.clone(), space.clone(), sender).await?;
+        super::entities::create(db, attribute_id.clone(), space.clone()).await?;
 
         let id = format!("{}", Uuid::new_v4());
 
@@ -438,8 +455,8 @@ pub mod triples {
                 attribute_id,
                 value.id(),
             );
-            sender.send(message).await.unwrap();
-            drop(sender);
+            //sender.send(message).await.unwrap();
+            //drop(sender);
 
             let mut triple = ActiveModel {
                 id: Set(id.clone()),
@@ -490,7 +507,6 @@ pub mod triples {
         value: ValueType,
         space: String,
         author: String,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         todo!("Need to handle delete triples");
         // let triple = ActiveModel {
@@ -522,12 +538,11 @@ pub mod actions {
     pub async fn create(
         db: &sea_orm::DatabaseConnection,
         action_triple: &ActionTriple,
-        sender: &Sender<String>,
     ) -> Result<(), DbErr> {
         let id = format!("{}", uuid::Uuid::new_v4());
         let message = format!("Creating action {}", id);
-        sender.send(message).await;
-        drop(sender);
+        //sender.send(message).await;
+        //drop(sender);
 
         let action_type = action_triple.action_type().to_string();
 

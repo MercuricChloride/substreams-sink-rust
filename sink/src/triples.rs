@@ -62,32 +62,23 @@ pub struct Action {
 
 impl Action {
     /// This function adds all of the action triples in this action to the database.
-    pub async fn execute_action_triples(
-        &self,
-        db: &DatabaseConnection,
-        sender: &Sender<String>,
-    ) -> Result<(), Error> {
-        let mut entry_futures = FuturesUnordered::from_iter(
-            self.actions
-                .iter()
-                .map(|action_triple| action_triple.execute(db, sender)),
-        );
-
-        while let Some(result) = entry_futures.next().await {
-            result?;
+    pub async fn execute_action_triples(&self, db: &DatabaseConnection) -> Result<(), Error> {
+        // we want to chunk these into groups based on the size of the constant MAX_CONNECTIONS
+        // and then execute them in parallel
+        let mut futures = FuturesUnordered::new();
+        // A chunk of futures to execute
+        let mut chunk = Vec::new();
+        for action_triple in self.actions.iter() {
+            chunk.push(action_triple.execute(db));
+            if chunk.len() == crate::MAX_CONNECTIONS {
+                futures.push(try_join_all(chunk));
+                chunk = Vec::new();
+            }
         }
 
-        Ok(())
-    }
-
-    pub async fn add_author_to_db(
-        &self,
-        db: &DatabaseConnection,
-        sender: &Sender<String>,
-    ) -> Result<(), Error> {
-        let author_address = self.author.clone();
-        let mut futures = FuturesUnordered::new();
-        futures.push(accounts::create(db, author_address, sender));
+        if !chunk.is_empty() {
+            futures.push(try_join_all(chunk));
+        }
 
         while let Some(result) = futures.next().await {
             result?;
@@ -96,12 +87,26 @@ impl Action {
         Ok(())
     }
 
+    pub async fn add_author_to_db(&self, db: &DatabaseConnection) -> Result<(), Error> {
+        let author_address = self.author.clone();
+        accounts::create(db, author_address).await?;
+        Ok(())
+    }
+
     /// This function returns a vector of all the sink actions that should be handled in this action.
-    pub fn get_sink_actions(self) -> Vec<SinkAction> {
+    pub fn get_sink_actions(self) -> Vec<(SinkAction, Option<SinkAction>)> {
         self.actions
             .into_iter()
-            .flat_map(|action| action.get_sink_actions())
-            .collect::<Vec<SinkAction>>()
+            .map(|action| action.get_sink_actions())
+            .collect::<Vec<(SinkAction, Option<SinkAction>)>>()
+    }
+
+    /// This function returns a vector of all the sink_actions that should be handled when running the global light api
+    pub fn get_global_sink_actions(self) -> Vec<(SinkAction, Option<SinkAction>)> {
+        self.actions
+            .into_iter()
+            .map(|action| action.get_global_sink_actions())
+            .collect::<Vec<(SinkAction, Option<SinkAction>)>>()
     }
 
     fn decode_with_space(
@@ -139,11 +144,28 @@ impl Action {
                 let decoded = general_purpose::URL_SAFE.decode(data.as_bytes()).unwrap();
                 let space = &entry.space;
                 let author = &entry.author;
-                Action::decode_with_space(&decoded, space, author)
+                let result = Action::decode_with_space(&decoded, space, author);
+                match result {
+                    Ok(action) => Ok(action),
+                    Err(err) => {
+                        println!("Failed to decode action: {}", err);
+                        Ok(Action {
+                            action_type: "decode_error".to_string(),
+                            author: entry.author.clone(),
+                            version: "1".to_string(),
+                            actions: vec![],
+                            space: entry.space.clone(),
+                        })
+                    }
+                }
             }
             uri if uri.starts_with("ipfs://") => {
                 let cid = uri.trim_start_matches("ipfs://");
                 let url = format!("{}{}", IPFS_ENDPOINT, cid);
+                if cid.len() != 46 {
+                    // if there is an invalid cid, we just return an empty action
+                    return Err(Error::msg(format!("Invalid CID: {}", cid)));
+                }
 
                 // check if we have a locally cached version of the file
                 let path = format!("./ipfs-data/{}.json", cid);
@@ -151,7 +173,11 @@ impl Action {
                 if let Ok(data) = std::fs::read_to_string(&path) {
                     let space = &entry.space;
                     let author = &entry.author;
-                    return Action::decode_with_space(data.as_bytes(), space, author);
+                    let result = Action::decode_with_space(&data.as_bytes(), space, author);
+                    match result {
+                        Ok(result) => Ok(result),
+                        Err(err) => Err(Error::msg(format!("Error decoding data: {}", err))),
+                    }
                 } else {
                     let mut attempts: i32 = 0;
                     let data;
@@ -180,7 +206,11 @@ impl Action {
                     // cache the file locally
                     std::fs::write(&path, &data)?;
 
-                    Action::decode_with_space(&data.as_bytes(), space, author)
+                    let result = Action::decode_with_space(&data.as_bytes(), space, author);
+                    match result {
+                        Ok(result) => Ok(result),
+                        Err(err) => Err(Error::msg(format!("Error decoding data: {}", err))),
+                    }
                 }
             }
             _ => Err(Error::msg("Invalid URI")),
@@ -229,21 +259,42 @@ impl<'de> Deserialize<'de> for ActionTriple {
 
         match val.get("type").and_then(Value::as_str) {
             Some("createEntity") => Ok(ActionTriple::CreateEntity {
-                entity_id: val["entityId"].as_str().unwrap().to_string(),
+                entity_id: val["entityId"]
+                    .as_str()
+                    .ok_or_else(|| serde::de::Error::custom("Missing entity id in create entity"))?
+                    .to_string(),
                 space: "".to_string(),
                 author: "".to_string(),
             }),
             Some("createTriple") => Ok(ActionTriple::CreateTriple {
-                entity_id: val["entityId"].as_str().unwrap().to_string(),
-                attribute_id: val["attributeId"].as_str().unwrap().to_string(),
-                value: serde_json::from_value(val["value"].clone()).unwrap(),
+                entity_id: val["entityId"]
+                    .as_str()
+                    .ok_or_else(|| serde::de::Error::custom("Missing entity id in create triple"))?
+                    .to_string(),
+                attribute_id: val["attributeId"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        serde::de::Error::custom("Missing attribute id in create triple")
+                    })?
+                    .to_string(),
+                value: serde_json::from_value(val["value"].clone())
+                    .expect("Failed to parse value within create triple"),
                 space: "".to_string(),
                 author: "".to_string(),
             }),
             Some("deleteTriple") => Ok(ActionTriple::DeleteTriple {
-                entity_id: val["entityId"].as_str().unwrap().to_string(),
-                attribute_id: val["attributeId"].as_str().unwrap().to_string(),
-                value: serde_json::from_value(val["value"].clone()).unwrap(),
+                entity_id: val["entityId"]
+                    .as_str()
+                    .ok_or_else(|| serde::de::Error::custom("Missing entity id in delete triple"))?
+                    .to_string(),
+                attribute_id: val["attributeId"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        serde::de::Error::custom("Missing attribute id in delete triple")
+                    })?
+                    .to_string(),
+                value: serde_json::from_value(val["value"].clone())
+                    .expect("Failed to parse value within delete triple"),
                 space: "".to_string(),
                 author: "".to_string(),
             }),
@@ -252,14 +303,31 @@ impl<'de> Deserialize<'de> for ActionTriple {
     }
 }
 
+impl TryFrom<ActionTriple> for SinkAction {
+    type Error = Error;
+
+    fn try_from(value: ActionTriple) -> Result<Self, Self::Error> {
+        let sink_action = value
+            .get_type_created()
+            .or_else(|| value.get_space_created())
+            .or_else(|| value.get_attribute_added())
+            .or_else(|| value.get_name_added())
+            .or_else(|| value.get_value_type_added())
+            .or_else(|| value.get_subspace_added())
+            .or_else(|| value.get_description_added())
+            .or_else(|| None);
+
+        match sink_action {
+            Some(sink_action) => Ok(sink_action),
+            None => Err(Error::msg("Failed to convert action triple to sink action")),
+        }
+    }
+}
+
 impl ActionTriple {
     /// This method includes the action_triple in the database
-    pub async fn execute(
-        &self,
-        db: &DatabaseConnection,
-        sender: &Sender<String>,
-    ) -> Result<(), Error> {
-        actions::create(db, self, sender).await?;
+    pub async fn execute(&self, db: &DatabaseConnection) -> Result<(), Error> {
+        actions::create(db, self).await?;
         Ok(())
     }
 
@@ -280,37 +348,45 @@ impl ActionTriple {
     }
 
     /// This method returns a vector of all the sink actions that should be handled in this action triple.
-    pub fn get_sink_actions(self) -> Vec<SinkAction> {
-        // all of the possible actions that can be taken in an action triple.
-        let actions = vec![
-            self.get_type_created(),
-            self.get_space_created(),
-            self.get_attribute_added(),
-            self.get_name_added(),
-            self.get_value_type_added(),
-            self.get_subspace_added(),
-        ];
-
+    pub fn get_sink_actions(self) -> (SinkAction, Option<SinkAction>) {
         let default_action = self.get_default_action();
 
-        // if there are any actions, return them, otherwise return the default action.
-        if let Some(action) = actions.into_iter().flatten().next() {
-            vec![default_action, action]
+        let sink_action = self.try_into().ok();
+
+        (default_action, sink_action)
+    }
+
+    /// This method returns a vector of all the sink actions that should be handled in this action triple, when running the global light api.
+    pub fn get_global_sink_actions(self) -> (SinkAction, Option<SinkAction>) {
+        let default_action = self.get_default_action();
+
+        let sink_action: Option<SinkAction> = self.try_into().ok();
+
+        if let Some(sink_action) = sink_action {
+            // we need to only keep the sink_action if it is one of the actions we care about in the global api
+            let action = match sink_action {
+                SinkAction::SpaceCreated { .. }
+                | SinkAction::TypeAdded { .. }
+                | SinkAction::NameAdded { .. }
+                | SinkAction::DescriptionAdded { .. } => Some(sink_action),
+                _ => None,
+            };
+            (default_action, action)
         } else {
-            vec![default_action]
+            (default_action, None)
         }
     }
 
-    fn get_default_action(self) -> SinkAction {
+    fn get_default_action(&self) -> SinkAction {
         match self {
             ActionTriple::CreateEntity {
                 entity_id,
                 space,
                 author,
             } => SinkAction::EntityCreated {
-                space,
-                entity_id,
-                author,
+                space: space.to_string(),
+                entity_id: entity_id.to_string(),
+                author: author.to_string(),
             },
             ActionTriple::CreateTriple {
                 entity_id,
@@ -319,11 +395,11 @@ impl ActionTriple {
                 space,
                 author,
             } => SinkAction::TripleAdded {
-                space,
-                entity_id,
-                attribute_id,
-                value,
-                author,
+                space: space.to_string(),
+                entity_id: entity_id.clone(),
+                attribute_id: attribute_id.clone(),
+                value: value.clone(),
+                author: author.clone(),
             },
             ActionTriple::DeleteTriple {
                 entity_id,
@@ -332,11 +408,11 @@ impl ActionTriple {
                 space,
                 author,
             } => SinkAction::TripleDeleted {
-                space,
-                entity_id,
-                attribute_id,
-                value,
-                author,
+                space: space.clone(),
+                entity_id: entity_id.clone(),
+                attribute_id: attribute_id.clone(),
+                value: value.clone(),
+                author: author.clone(),
             },
         }
     }
@@ -418,6 +494,30 @@ impl ActionTriple {
                         space: space.clone(),
                         entity_id: entity_id.clone(),
                         name: value.clone(),
+                    });
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn get_description_added(&self) -> Option<SinkAction> {
+        match self {
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+                ..
+            } if attribute_id.starts_with(Attributes::Description.id()) => {
+                // if the attribute id is attribute, then we have added an attribute to an entity.
+                if let ValueType::String { value, .. } = value {
+                    return Some(SinkAction::DescriptionAdded {
+                        space: space.clone(),
+                        entity_id: entity_id.clone(),
+                        description: value.clone(),
                     });
                 } else {
                     None
@@ -617,9 +717,9 @@ impl<'de> Deserialize<'de> for ValueType {
     }
 }
 
-impl Into<Vec<SinkAction>> for ActionTriple {
-    fn into(self) -> Vec<SinkAction> {
-        self.get_sink_actions()
+impl From<ActionTriple> for (SinkAction, Option<SinkAction>) {
+    fn from(action_triple: ActionTriple) -> Self {
+        action_triple.get_sink_actions()
     }
 }
 
