@@ -5,3 +5,4 @@
 /target
 /ipfs-data/
 /.env
+/replay.log
