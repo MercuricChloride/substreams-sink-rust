@@ -58,6 +58,7 @@ mod sink_actions;
 mod substreams;
 mod substreams_stream;
 mod triples;
+mod retry;
 pub mod tui;
 
 pub const MAX_CONNECTIONS: usize = 499;
