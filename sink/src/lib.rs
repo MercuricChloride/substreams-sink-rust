@@ -48,17 +48,17 @@ use commands::Args;
 
 use models::cursor;
 
-mod commands;
+pub mod commands;
 pub mod constants;
 pub mod gui;
 pub mod models;
-mod pb;
-mod persist;
-mod sink_actions;
-mod substreams;
-mod substreams_stream;
-mod triples;
-mod retry;
+pub mod pb;
+pub mod persist;
+pub mod sink_actions;
+pub mod substreams;
+pub mod substreams_stream;
+pub mod triples;
+pub mod retry;
 pub mod tui;
 
 pub const MAX_CONNECTIONS: usize = 499;
