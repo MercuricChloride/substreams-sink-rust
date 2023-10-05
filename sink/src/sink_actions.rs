@@ -3,14 +3,16 @@ use futures03::future::{join_all, try_join_all};
 use futures03::stream::{FuturesOrdered, FuturesUnordered};
 use migration::DbErr;
 use sea_orm::{DatabaseConnection, DatabaseTransaction};
+use strum::EnumIter;
 use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio_stream::StreamExt;
 
+use crate::constants::{Entities, self};
 use crate::triples::{ActionTriple, ValueType};
 
 use crate::models::*;
 
-#[derive(Debug)]
+#[derive(Debug, EnumIter)]
 /// This enum represents different actions that the sink should handle. Actions being specific changes to the graph.
 /// You should understand that we have two kinds of actions.
 ///
@@ -28,26 +30,18 @@ pub enum SinkAction {
     /// This action denotes a newly created space. The string is the address of the space.
     /// We care about this in the sink because when a new space is created, we need to deploy
     /// a new subgraph for that space.
-    SpaceCreated { entity_id: String, space: String },
-
-    /// This action denotes a newly created type. The string is the name of the type.
-    /// We care about this in the sink because when a new type is created, we need to deploy
-    /// a new subgraph for that type.
-    ///
-    /// When a type is created in geo, it looks like this:
-    ///
-    /// `(Entity, "types", TypeEntity)`
-    TypeCreated {
-        /// The entity ID of the type that was created.
+    SpaceCreated {
         entity_id: String,
-        /// The address of the space that this type was created in.
         space: String,
+        created_in_space: String,
     },
 
     /// This action denotes a type being added to an entity in the DB
     /// Something like this:
     ///
     /// `(EntityID, "types", TypeEntity)`
+    ///
+    /// Note that a TypeAdded action may also create a new type if the type_id is the "Type" entity in the root space.
     TypeAdded {
         /// The address of the space that this type was created in.
         space: String,
@@ -88,6 +82,7 @@ pub enum SinkAction {
         entity_id: String,
         description: String,
     },
+
     /// Covers can be added to spaces, this is the cover image for the webpage
     CoverAdded {
         space: String,
@@ -95,12 +90,20 @@ pub enum SinkAction {
         cover_image: String,
     },
 
+    /// Avatars can be added to users
+    AvatarAdded {
+        space: String,
+        entity_id: String,
+        avatar_image: String,
+    },
+
     /// We care about a ValueType being added to an entity because we need this when adding attributes to a type in the graph.
     ValueTypeAdded {
         space: String,
         entity_id: String,
         attribute_id: String,
-        value_type: ValueType,
+        /// The entity id of that particular value type
+        value_type: String,
     },
 
     /// Spaces can have subspaces, and we need to know when a subspace is added to a space so we can deploy a new subgraph for that space.
@@ -144,53 +147,56 @@ pub enum SinkAction {
 pub async fn handle_sink_actions(
     sink_actions: Vec<(SinkAction, Option<SinkAction>)>,
     db: &DatabaseConnection,
-) -> Result<(), Error> {
-    let mut futures = FuturesUnordered::new();
+) -> Result<(), DbErr> {
+    let mut futures = FuturesOrdered::new();
     let mut chunk = Vec::new();
+
+    // we want to grab all of the default actions to execute first, than all of the optional actions after
+    let mut actions = Vec::new();
     for (default_action, optional_action) in sink_actions {
         // if there is an optional action, we need to execute it
         if let Some(action) = optional_action {
-            chunk.push(action.execute(db));
-
-            if chunk.len() == crate::MAX_CONNECTIONS {
-                futures.push(try_join_all(chunk));
-                chunk = Vec::new();
-            }
+            actions.push(action);
+            //optional_actions.push(action);
         }
+        actions.push(default_action);
 
-        chunk.push(default_action.execute(db));
+        //default_actions.push(default_action);
+    }
+
+    // sort the actions by priority
+    actions.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
+
+    for action in actions {
+        chunk.push(action.execute(db));
+
         if chunk.len() == crate::MAX_CONNECTIONS {
-            futures.push(try_join_all(chunk));
+            futures.push_back(try_join_all(chunk));
             chunk = Vec::new();
         }
     }
-
+    
     if !chunk.is_empty() {
-        futures.push(try_join_all(chunk));
+        futures.push_back(try_join_all(chunk));
     }
 
     while let Some(result) = futures.next().await {
         result?;
     }
-
     Ok(())
 }
 
 impl SinkAction {
     pub async fn execute(self, db: &DatabaseConnection) -> Result<(), DbErr> {
         match self {
-            SinkAction::SpaceCreated { entity_id, space } => {
+            SinkAction::SpaceCreated {
+                entity_id,
+                space,
+                created_in_space,
+            } => {
                 let space = space.to_lowercase();
                 spaces::create_schema(db, &space).await?;
-                spaces::create(db, entity_id, space).await?
-            }
-
-            SinkAction::TypeCreated { entity_id, space } => {
-                let space = space.to_lowercase();
-                // make the entity a type in the global schema
-                entities::upsert_is_type(db, entity_id.clone(), true).await?;
-                // create a table within the space schema for this type
-                entities::create_table(db, &entity_id, &space).await?
+                spaces::create(db, entity_id, space, created_in_space).await?
             }
 
             SinkAction::TypeAdded {
@@ -199,15 +205,27 @@ impl SinkAction {
                 type_id,
             } => {
                 let space = space.to_lowercase();
+                // if the type_id is the "Type" Entity, this means we are designating the entity as a type.
+                // Because we are giving it a "type" of "Type"
+                //if type_id == Entities::Type.id() {
+                entities::upsert_is_type(db, type_id.clone(), true).await?;
+
+                if &type_id == constants::Entities::SchemaType.id() {
+                    entities::upsert_is_type(db, entity_id.clone(), true).await?;
+                    entities::create_table(db, &entity_id, &space).await?;
+                }
+
+                entities::create_table(db, &type_id, &space).await?;
+                //}
                 // add the entity_id to the type_id table
-                entities::add_type(db, &entity_id, &type_id).await?
+                entities::add_type(db, &entity_id, &type_id, &space).await?
             }
 
             SinkAction::AttributeAdded {
                 space,
                 entity_id,
-                attribute_id,
                 value,
+                ..
             } => {
                 let space = space.to_lowercase();
                 let value_id = value.id().to_string();
@@ -224,7 +242,7 @@ impl SinkAction {
             } => {
                 let space = space.to_lowercase();
                 //TODO Update the table name to via a smart comment
-                entities::upsert_name(db, entity_id, name).await?;
+                entities::upsert_name(db, entity_id, name, space).await?;
             }
 
             SinkAction::ValueTypeAdded {
@@ -264,7 +282,7 @@ impl SinkAction {
                 attribute_id,
                 value,
                 author,
-            } => {} //triples::delete(db, entity_id, attribute_id, value, space, author).await,
+            } => triples::delete(db, entity_id, attribute_id, value, space, author).await?,
 
             SinkAction::EntityCreated {
                 space, entity_id, ..
@@ -279,14 +297,225 @@ impl SinkAction {
                 description,
             } => {
                 let space = space.to_lowercase();
-                entities::upsert_description(db, entity_id, description).await?
+                entities::upsert_description(db, entity_id, description, space).await?
             }
+
             SinkAction::CoverAdded {
                 space,
                 entity_id,
                 cover_image,
             } => todo!(),
+
+            SinkAction::AvatarAdded {
+                space,
+                entity_id,
+                avatar_image,
+            } => todo!(),
         };
         Ok(())
+    }
+
+    pub fn is_default_action(&self) -> bool {
+        match self {
+            SinkAction::TripleAdded { .. }
+            | SinkAction::TripleDeleted { .. }
+            | SinkAction::EntityCreated { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_global_sink_action(&self) -> bool {
+        match self {
+            SinkAction::SpaceCreated { .. }
+            | SinkAction::TypeAdded { .. }
+            | SinkAction::AttributeAdded { .. }
+            | SinkAction::NameAdded { .. }
+            | SinkAction::DescriptionAdded { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub fn action_priority(&self) -> i32 {
+        match self {
+            // space created is the first action to take in the Db
+            SinkAction::AttributeAdded { .. }
+            | SinkAction::SpaceCreated { .. } => 5,
+            SinkAction::TypeAdded {..} => 4,
+            // idk about these yet
+            | SinkAction::DescriptionAdded { .. }
+            | SinkAction::NameAdded { .. }
+            | SinkAction::CoverAdded { .. }
+            | SinkAction::AvatarAdded { .. }
+            | SinkAction::ValueTypeAdded { .. }
+            | SinkAction::SubspaceAdded { .. }
+            | SinkAction::SubspaceRemoved { .. } => 3,
+            // if it is a default action just leave it at 2
+            _ => 2,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SinkAction;
+    use crate::constants::{Attributes, Entities};
+    use crate::triples::{ActionTriple, ValueType};
+    use strum::IntoEnumIterator;
+
+    const ENTITY_ID: &'static str = "sample-entity-id";
+
+    fn dummy_triple_for_action(sink_action: &SinkAction) -> ActionTriple {
+        match sink_action {
+            SinkAction::SpaceCreated { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Space.id().to_string(),
+                value: ValueType::String {
+                    id: "string-id".to_string(),
+                    value: "0xSpaceAddress".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::TypeAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Type.id().to_string(),
+                value: ValueType::Entity {
+                    id: "some-type-id".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::AttributeAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Attribute.id().to_string(),
+                value: ValueType::Entity {
+                    id: "Whatever".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::NameAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Name.id().to_string(),
+                value: ValueType::String {
+                    id: "String Id".to_string(),
+                    value: "Some Name".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::DescriptionAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Description.id().to_string(),
+                value: ValueType::String {
+                    id: "String Id".to_string(),
+                    value: "Some Description".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::CoverAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Cover.id().to_string(),
+                value: ValueType::String {
+                    id: "String Id".to_string(),
+                    value: "Some Cover Link".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::AvatarAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Avatar.id().to_string(),
+                value: ValueType::String {
+                    id: "String Id".to_string(),
+                    value: "Some Avatar Link".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::ValueTypeAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::ValueType.id().to_string(),
+                value: ValueType::Entity {
+                    id: "Some Value Type Id".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::SubspaceAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Subspace.id().to_string(),
+                value: ValueType::Entity {
+                    id: "Some other space".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::SubspaceRemoved { .. } => ActionTriple::DeleteTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Subspace.id().to_string(),
+                value: ValueType::Entity {
+                    id: "Some other space".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::TripleAdded { .. } => ActionTriple::CreateTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Subspace.id().to_string(),
+                value: ValueType::Entity {
+                    id: "Some other space".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::EntityCreated { .. } => ActionTriple::CreateEntity {
+                entity_id: "entity-id".to_string(),
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+
+            SinkAction::TripleDeleted { .. } => ActionTriple::DeleteTriple {
+                entity_id: ENTITY_ID.to_string(),
+                attribute_id: Attributes::Subspace.id().to_string(),
+                value: ValueType::Entity {
+                    id: "Some other space".to_string(),
+                },
+                space: "space".to_string(),
+                author: "author".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_each_sink_action() {
+        for action in SinkAction::iter() {
+            let triple = dummy_triple_for_action(&action);
+
+            if action.is_default_action() {
+                // if it is a default action, we don't need to test it
+                continue;
+            } else {
+                let sink_action: Option<SinkAction> = triple.try_into().ok();
+
+                assert!(
+                    sink_action.is_some(),
+                    "couldnt match for sink action {:?}",
+                    action
+                );
+            }
+        }
     }
 }

@@ -34,7 +34,7 @@ use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio_stream::StreamExt;
 
 use crate::{
-    constants::Attributes,
+    constants::{Attributes, Entities},
     models::{self, accounts, actions},
     pb::schema::EntryAdded,
     sink_actions::SinkAction,
@@ -62,13 +62,18 @@ pub struct Action {
 
 impl Action {
     /// This function adds all of the action triples in this action to the database.
-    pub async fn execute_action_triples(&self, db: &DatabaseConnection) -> Result<(), Error> {
+    pub async fn execute_action_triples(&self, db: &DatabaseConnection) -> Result<(), DbErr> {
         // we want to chunk these into groups based on the size of the constant MAX_CONNECTIONS
         // and then execute them in parallel
         let mut futures = FuturesUnordered::new();
         // A chunk of futures to execute
         let mut chunk = Vec::new();
         for action_triple in self.actions.iter() {
+            if action_triple.is_missing_data() {
+                println!("Missing data in action triple: {:?} in action: {:?}", action_triple, self);
+                continue;
+            }
+
             chunk.push(action_triple.execute(db));
             if chunk.len() == crate::MAX_CONNECTIONS {
                 futures.push(try_join_all(chunk));
@@ -87,7 +92,11 @@ impl Action {
         Ok(())
     }
 
-    pub async fn add_author_to_db(&self, db: &DatabaseConnection) -> Result<(), Error> {
+    pub async fn add_author_to_db(&self, db: &DatabaseConnection) -> Result<(), DbErr> {
+        if self.author.is_empty() {
+            println!("Author is empty");
+            return Ok(());
+        }
         let author_address = self.author.clone();
         accounts::create(db, author_address).await?;
         Ok(())
@@ -97,6 +106,7 @@ impl Action {
     pub fn get_sink_actions(self) -> Vec<(SinkAction, Option<SinkAction>)> {
         self.actions
             .into_iter()
+            .filter(|action| !action.is_missing_data())
             .map(|action| action.get_sink_actions())
             .collect::<Vec<(SinkAction, Option<SinkAction>)>>()
     }
@@ -149,13 +159,7 @@ impl Action {
                     Ok(action) => Ok(action),
                     Err(err) => {
                         println!("Failed to decode action: {}", err);
-                        Ok(Action {
-                            action_type: "decode_error".to_string(),
-                            author: entry.author.clone(),
-                            version: "1".to_string(),
-                            actions: vec![],
-                            space: entry.space.clone(),
-                        })
+                        Err(Error::msg(format!("Error decoding data: {}", err)))
                     }
                 }
             }
@@ -308,13 +312,16 @@ impl TryFrom<ActionTriple> for SinkAction {
 
     fn try_from(value: ActionTriple) -> Result<Self, Self::Error> {
         let sink_action = value
-            .get_type_created()
-            .or_else(|| value.get_space_created())
+            .get_space_created()
+            .or_else(|| value.get_type_added())
             .or_else(|| value.get_attribute_added())
             .or_else(|| value.get_name_added())
+            .or_else(|| value.get_description_added())
+            .or_else(|| value.get_cover_added())
+            .or_else(|| value.get_avatar_added())
             .or_else(|| value.get_value_type_added())
             .or_else(|| value.get_subspace_added())
-            .or_else(|| value.get_description_added())
+            .or_else(|| value.get_subspace_removed())
             .or_else(|| None);
 
         match sink_action {
@@ -325,8 +332,28 @@ impl TryFrom<ActionTriple> for SinkAction {
 }
 
 impl ActionTriple {
+
+    pub fn is_missing_data(&self) -> bool {
+        match self {
+            ActionTriple::CreateEntity { entity_id, .. } => entity_id.is_empty(),
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                ..
+            } => entity_id.is_empty() || attribute_id.is_empty() || value.id().is_empty(),
+            ActionTriple::DeleteTriple {
+                entity_id,
+                attribute_id,
+                value,
+                ..
+            } => entity_id.is_empty() || attribute_id.is_empty() || value.id().is_empty(),
+        }
+    }
+
+
     /// This method includes the action_triple in the database
-    pub async fn execute(&self, db: &DatabaseConnection) -> Result<(), Error> {
+    pub async fn execute(&self, db: &DatabaseConnection) -> Result<(), DbErr> {
         actions::create(db, self).await?;
         Ok(())
     }
@@ -363,15 +390,11 @@ impl ActionTriple {
         let sink_action: Option<SinkAction> = self.try_into().ok();
 
         if let Some(sink_action) = sink_action {
-            // we need to only keep the sink_action if it is one of the actions we care about in the global api
-            let action = match sink_action {
-                SinkAction::SpaceCreated { .. }
-                | SinkAction::TypeAdded { .. }
-                | SinkAction::NameAdded { .. }
-                | SinkAction::DescriptionAdded { .. } => Some(sink_action),
-                _ => None,
-            };
-            (default_action, action)
+            if sink_action.is_global_sink_action() {
+                (default_action, Some(sink_action))
+            } else {
+                (default_action, None)
+            }
         } else {
             (default_action, None)
         }
@@ -417,16 +440,18 @@ impl ActionTriple {
         }
     }
 
-    fn get_type_created(&self) -> Option<SinkAction> {
+    fn get_type_added(&self) -> Option<SinkAction> {
         match self {
             ActionTriple::CreateTriple {
                 entity_id,
                 attribute_id,
                 space,
+                value,
                 ..
-            } if attribute_id.starts_with(Attributes::Type.id()) => Some(SinkAction::TypeCreated {
-                entity_id: entity_id.to_string(),
+            } if attribute_id.starts_with(Attributes::Type.id()) => Some(SinkAction::TypeAdded {
                 space: space.to_string(),
+                entity_id: entity_id.to_string(),
+                type_id: value.id().to_string(),
             }),
             _ => None,
         }
@@ -438,6 +463,7 @@ impl ActionTriple {
                 attribute_id,
                 value,
                 entity_id,
+                space,
                 ..
             } if attribute_id.starts_with(Attributes::Space.id()) => {
                 // if the attribute id is space, and the value is a string, then we have created a space.
@@ -445,6 +471,7 @@ impl ActionTriple {
                     Some(SinkAction::SpaceCreated {
                         entity_id: entity_id.to_string(),
                         space: value.clone(),
+                        created_in_space: space.clone(),
                     })
                 } else {
                     None
@@ -527,6 +554,52 @@ impl ActionTriple {
         }
     }
 
+    fn get_cover_added(&self) -> Option<SinkAction> {
+        match self {
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+                ..
+            } if attribute_id.starts_with(Attributes::Cover.id()) => {
+                if let ValueType::String { value, .. } = value {
+                    return Some(SinkAction::CoverAdded {
+                        space: space.clone(),
+                        entity_id: entity_id.clone(),
+                        cover_image: value.clone(),
+                    });
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn get_avatar_added(&self) -> Option<SinkAction> {
+        match self {
+            ActionTriple::CreateTriple {
+                entity_id,
+                attribute_id,
+                value,
+                space,
+                ..
+            } if attribute_id.starts_with(Attributes::Avatar.id()) => {
+                if let ValueType::String { value, .. } = value {
+                    return Some(SinkAction::AvatarAdded {
+                        space: space.clone(),
+                        entity_id: entity_id.clone(),
+                        avatar_image: value.clone(),
+                    });
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn get_value_type_added(&self) -> Option<SinkAction> {
         match self {
             ActionTriple::CreateTriple {
@@ -536,12 +609,16 @@ impl ActionTriple {
                 space,
                 ..
             } if attribute_id.starts_with(Attributes::ValueType.id()) => {
-                Some(SinkAction::ValueTypeAdded {
-                    space: space.clone(),
-                    entity_id: entity_id.clone(),
-                    attribute_id: attribute_id.clone(),
-                    value_type: value.clone(),
-                })
+                if let ValueType::Entity { id } = value {
+                    Some(SinkAction::ValueTypeAdded {
+                        space: space.clone(),
+                        entity_id: entity_id.clone(),
+                        attribute_id: attribute_id.clone(),
+                        value_type: id.to_string(),
+                    })
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -633,6 +710,14 @@ pub enum ValueType {
         /// The url string
         value: String,
     },
+}
+
+impl Default for ValueType {
+    fn default() -> Self {
+        ValueType::Entity {
+            id: "Default-entity-id".to_string(),
+        }
+    }
 }
 
 impl ValueType {

@@ -26,6 +26,7 @@ pub struct Model {
     pub string_value: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub entity_value: Option<String>,
+    pub deleted: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

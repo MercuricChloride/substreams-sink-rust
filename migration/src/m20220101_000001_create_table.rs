@@ -11,7 +11,7 @@ use sea_orm_migration::{
 macro_rules! drop_table {
     ($manager:ident, $table:ident) => {
         $manager
-            .drop_table(Table::drop().table($table::Table).to_owned())
+            .drop_table(Table::drop().table($table::Table).cascade().to_owned())
             .await?;
     };
 }
@@ -30,6 +30,30 @@ impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // create the cursors table
         let connection: &SchemaManagerConnection = &manager.get_connection();
+
+        // disable all foreign key checks
+        // connection
+        //     .execute(Statement::from_string(
+        //         DatabaseBackend::Postgres,
+        //         "SET session_replication_role = 'replica';",
+        //     ))
+        //     .await?;
+
+        // connection
+        //     .execute(Statement::from_string(
+        //         DatabaseBackend::Postgres,
+        //         "ALTER SYSTEM SET session_replication_role TO 'replica';",
+        //     ))
+        //     .await?;
+
+        // connection
+        //     .execute(Statement::from_string(
+        //         DatabaseBackend::Postgres,
+        //         "SELECT pg_reload_conf();",
+        //     ))
+        //     .await?;
+
+
 
         // create the cursors table
         manager
@@ -118,24 +142,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // create the entity types table
-        manager
-            .create_table(
-                Table::create()
-                    .table(EntityTypes::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(EntityTypes::Id)
-                            .text()
-                            .unique_key()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(EntityTypes::EntityId).text().not_null())
-                    .col(ColumnDef::new(EntityTypes::Type).text().not_null())
-                    .to_owned(),
-            )
-            .await?;
-
         // create the entities table
         manager
             .create_table(
@@ -151,10 +157,61 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Entities::Name).string())
                     .col(ColumnDef::new(Entities::Description).string())
                     .col(ColumnDef::new(Entities::IsType).boolean().default(false))
-                    .col(ColumnDef::new(Entities::DefinedIn).text())
+                    .col(ColumnDef::new(Entities::DefinedIn).text().null())
                     .col(ColumnDef::new(Entities::ValueType).text())
                     .col(ColumnDef::new(Entities::Version).text())
                     .col(ColumnDef::new(Entities::Versions).array(ColumnType::Text))
+                    .to_owned(),
+            )
+            .await?;
+
+        // create the entity attribute foreign keys
+        manager
+            .create_foreign_key(
+                ForeignKey::create()
+                    .name("entity_attributes_entity_id_fkey")
+                    .from(EntityAttributes::Table, EntityAttributes::EntityId)
+                    .to(Entities::Table, Entities::Id)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_foreign_key(
+                ForeignKey::create()
+                    .name("entity_attributes_attribute_of_fkey")
+                    .from(EntityAttributes::Table, EntityAttributes::AttributeOf)
+                    .to(Entities::Table, Entities::Id)
+                    .to_owned(),
+            )
+            .await?;
+
+        // create the entity types table
+        manager
+            .create_table(
+                Table::create()
+                    .table(EntityTypes::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(EntityTypes::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(EntityTypes::EntityId).text().not_null())
+                    .col(ColumnDef::new(EntityTypes::Type).text().not_null())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("entity_types_entity_id_fkey")
+                            .from(EntityTypes::Table, EntityTypes::EntityId)
+                            .to(Entities::Table, Entities::Id),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("entity_types_type_fkey")
+                            .from(EntityTypes::Table, EntityTypes::Type)
+                            .to(Entities::Table, Entities::Id),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -166,13 +223,29 @@ impl MigrationTrait for Migration {
                     .table(Spaces::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Spaces::Id).text().unique_key().primary_key())
-                    .col(ColumnDef::new(Spaces::Address).text())
+                    .col(ColumnDef::new(Spaces::Address).text().unique_key())
                     .col(ColumnDef::new(Spaces::CreatedAtBlock).text())
                     .col(ColumnDef::new(Spaces::IsRootSpace).boolean())
                     .col(ColumnDef::new(Spaces::Admins).text())
                     .col(ColumnDef::new(Spaces::EditorControllers).text())
                     .col(ColumnDef::new(Spaces::Editors).text())
                     .col(ColumnDef::new(Spaces::Entity).text())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("spaces_id_entity_id_fkey")
+                            .from(Spaces::Table, Spaces::Id)
+                            .to(Entities::Table, Entities::Id),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_foreign_key(
+                ForeignKey::create()
+                    .name("entity_defined_in_spaces_address_fkey")
+                    .from(Entities::Table, Entities::DefinedIn)
+                    .to(Spaces::Table, Spaces::Address)
                     .to_owned(),
             )
             .await?;
@@ -195,10 +268,34 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Triples::ValueType).text().not_null())
                     .col(ColumnDef::new(Triples::DefinedIn).text().not_null())
                     .col(ColumnDef::new(Triples::IsProtected).boolean().not_null())
+                    .col(
+                        ColumnDef::new(Triples::Deleted)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
                     .col(ColumnDef::new(Triples::NumberValue).text())
                     .col(ColumnDef::new(Triples::ArrayValue).text())
                     .col(ColumnDef::new(Triples::StringValue).text())
                     .col(ColumnDef::new(Triples::EntityValue).text())
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("triples_entity_entity_id_fkey")
+                            .from(Triples::Table, Triples::EntityId)
+                            .to(Entities::Table, Entities::Id),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("triples_attribute_entity_id_fkey")
+                            .from(Triples::Table, Triples::AttributeId)
+                            .to(Entities::Table, Entities::Id),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("triples_entity_value_entity_id_fkey")
+                            .from(Triples::Table, Triples::EntityValue)
+                            .to(Entities::Table, Entities::Id),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -324,8 +421,15 @@ impl MigrationTrait for Migration {
         let table_query =
             format!("CREATE TABLE IF NOT EXISTS \"0x170b749413328ac9a94762031a7a05b00c1d2e34\".\"FOO\" (id text);");
 
+        let bootstrap_root_space_entity =
+            format!("INSERT INTO \"public\".\"entities\" (\"id\") VALUES ('root_space');");
+
         let bootstrap_root_space =
             format!("INSERT INTO \"public\".\"spaces\" (\"id\", \"address\", \"is_root_space\") VALUES ('root_space', '0x170b749413328ac9a94762031a7a05b00c1d2e34', true);");
+
+        let bootstrap_root_space_defined_in =
+            format!("UPDATE \"public\".\"entities\" set \"defined_in\" = ('0x170b749413328ac9a94762031a7a05b00c1d2e34') WHERE \"id\" = 'root_space'");
+
 
         connection
             .execute(Statement::from_string(
@@ -344,7 +448,29 @@ impl MigrationTrait for Migration {
         connection
             .execute(Statement::from_string(
                 DatabaseBackend::Postgres,
+                bootstrap_root_space_entity,
+            ))
+            .await?;
+
+        connection
+            .execute(Statement::from_string(
+                DatabaseBackend::Postgres,
                 bootstrap_root_space,
+            ))
+            .await?;
+
+        // disable all foreign key checks
+        // connection
+        //     .execute(Statement::from_string(
+        //         DatabaseBackend::Postgres,
+        //         "SET session_replication_role = 'origin';",
+        //     ))
+        //     .await?;
+
+        connection
+            .execute(Statement::from_string(
+                DatabaseBackend::Postgres,
+                bootstrap_root_space_defined_in,
             ))
             .await?;
 
@@ -380,7 +506,7 @@ impl MigrationTrait for Migration {
                 let table_name = table.try_get_by_index::<String>(0).unwrap();
                 println!("Dropping table {}", table_name);
                 let query = format!(
-                    "DROP TABLE IF EXISTS \"{}\".\"{}\";",
+                    "DROP TABLE IF EXISTS \"{}\".\"{}\" CASCADE;",
                     schema_name, table_name
                 );
                 table_drops.push(
@@ -407,7 +533,6 @@ impl MigrationTrait for Migration {
             Cursors,
             Spaces,
             Accounts,
-            Entities,
             LogEntries,
             EntityAttributes,
             EntityTypes,
@@ -415,6 +540,7 @@ impl MigrationTrait for Migration {
             Proposals,
             ProposedVersions,
             Actions,
+            Entities,
             Versions
         );
 
@@ -499,6 +625,7 @@ enum Triples {
     AttributeId,
     ValueId,
     ValueType,
+    Deleted,
     NumberValue,
     StringValue,
     EntityValue,

@@ -1,9 +1,18 @@
+use anyhow::Error;
+use sea_orm::DatabaseConnection;
+use strum::EnumIter;
+use strum::IntoEnumIterator;
+
+use crate::models::triples;
+use crate::triples::ValueType;
+
 /// In geo we have a few different attributes that are commonly used. This is a list of their ids.
 /// Example: if we are giving something a type of Dog, we would do it like this:
 ///
 /// `(EntityId, Attributes::Type, "Dog")`
 ///
-/// This is just more readable than using a string literate, especially since we have plurals in the mix.
+/// This is just more readable than using a string literal, especially since we have plurals in the mix.
+#[derive(EnumIter)]
 pub enum Attributes {
     Type,
     Attribute,
@@ -14,6 +23,16 @@ pub enum Attributes {
     Subspace,
     Cover,
     Avatar,
+    // new types
+    Image,
+    IndexedSpace,
+    ForeignTypes,
+    Blocks,
+    ParentEntity,
+    MarkdownContent,
+    RowType,
+    Filter,
+    RelationValueRelationshipType,
 }
 
 impl Attributes {
@@ -29,23 +48,174 @@ impl Attributes {
             Attributes::Subspace => "442e1850-9de7-4002-a065-7bc8fcff2514",
             Attributes::Avatar => "235ba0e8-dc7e-4bdd-a1e1-6d0d4497f133",
             Attributes::Cover => "34f53507-2e6b-42c5-a844-43981a77cfa2",
+            Attributes::Image => "ba4e4146-0010-499d-a0a3-caaa7f579d0e",
+            Attributes::IndexedSpace => "30659852-2df5-42f6-9ad7-2921c33ad84b",
+            Attributes::ForeignTypes => "be745973-05a9-4cd0-a46d-1c5538270faf",
+            Attributes::Blocks => "beaba5cb-a677-41a8-b353-77030613fc70",
+            Attributes::ParentEntity => "dd4999b9-77f0-4c2b-a02b-5a26b233854e",
+            Attributes::MarkdownContent => "f88047ce-bd8d-4fbf-83f6-58e84ee533e4",
+            Attributes::RowType => "577bd9fb-b29e-4e2b-b5f8-f48aedbd26ac",
+            Attributes::Filter => "b0f2d71a-79ca-4dc4-9218-e3e40dfed103",
+            Attributes::RelationValueRelationshipType => "cfa6a2f5-151f-43bf-a684-f7f0228f63ff",
         }
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            Attributes::Type => "Type",
-            Attributes::Attribute => "Attribute",
+            Attributes::Type => "Types",
+            Attributes::Attribute => "Attributes",
             Attributes::Space => "Space",
             Attributes::Name => "Name",
             Attributes::Description => "Description",
-            Attributes::ValueType => "ValueType",
+            Attributes::ValueType => "Value type",
             Attributes::Subspace => "Subspace",
-            Attributes::Avatar => "Avatar",
-            Attributes::Cover => "Cover",
+            Attributes::Avatar => "Avatar Attribute",
+            Attributes::Cover => "Cover Attribute",
+            Attributes::Image => "Image Attribute",
+            Attributes::IndexedSpace => "Indexed Space",
+            Attributes::ForeignTypes => "Foreign Types",
+            Attributes::Blocks => "Blocks",
+            Attributes::ParentEntity => "Parent Entity",
+            Attributes::MarkdownContent => "Markdown Content",
+            Attributes::RowType => "Row Type",
+            Attributes::Filter => "Filter",
+            Attributes::RelationValueRelationshipType => "Relation Value Type",
+        }
+    }
+
+    pub fn value_type(&self) -> Option<Entities> {
+        match self {
+            Attributes::Attribute
+            | Attributes::ValueType
+            | Attributes::ForeignTypes
+            | Attributes::RowType
+            | Attributes::Blocks
+            | Attributes::ParentEntity
+            | Attributes::RelationValueRelationshipType
+            | Attributes::Type => Some(Entities::Relation),
+            Attributes::Image
+            | Attributes::Description
+            | Attributes::Name
+            | Attributes::Space
+            | Attributes::Filter
+            | Attributes::MarkdownContent => Some(Entities::Text),
+            _ => None,
+        }
+    }
+
+}
+
+    pub async fn bootstrap(db:&DatabaseConnection, author: &String) -> Result<(), Error> {
+        let name_attribute = Attributes::Name.id();
+        let type_attribute = Attributes::Type.id();
+        let attribute_entity = Entities::Attribute.id();
+        let value_type_attribute = Attributes::ValueType.id();
+
+        for attribute in Attributes::iter() {
+            // bootstrap the name of the attribute
+            let entity_id = attribute.id();
+            let value = attribute.name();
+            let value = ValueType::String { id: entity_id.to_string(), value: value.to_string() };
+            let space = ROOT_SPACE_ADDRESS.to_string();
+            triples::create(db, entity_id.into(), name_attribute.into(), value, space.clone(), author.to_string()).await?;
+
+            // bootstrap the attribute to have a type of attribute
+            let value = ValueType::Entity { id: attribute_entity.to_string() };
+            triples::create(db, entity_id.into(), type_attribute.into(), value, space.clone(), author.to_string()).await?;
+
+            // bootstrap the value_type of the attribute if it has one
+            if let Some(value_type) = attribute.value_type() {
+                let value = ValueType::Entity { id: value_type.id().to_string() };
+                triples::create(db, entity_id.into(), value_type_attribute.into(), value, space.clone(), author.to_string()).await?;
+            }
+        }
+
+        for entity in Entities::iter() {
+            // bootstrap the name of the entity
+            let entity_id = entity.id();
+            let value = entity.name();
+            let value = ValueType::String { id: entity_id.to_string(), value: value.to_string() };
+            let space = ROOT_SPACE_ADDRESS.to_string();
+            triples::create(db, entity_id.into(), name_attribute.into(), value, space.clone(), author.to_string()).await?;
+
+            // bootstrap the entity to have a type of schema type
+            let value = ValueType::Entity { id: Entities::SchemaType.id().to_string() };
+            triples::create(db, entity_id.into(), type_attribute.into(), value, space.clone(), author.to_string()).await?;
+
+            for attribute in entity.attributes() {
+                // add the attribute to the entity
+                let value = ValueType::Entity { id: attribute.id().to_string() };
+                triples::create(db, entity_id.into(), attribute_entity.into(), value, space.clone(), author.to_string()).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+/// This is an enum of some useful entities that are used. In geo.
+/// For example the type entity, which is used to give an entity, a type of type.
+#[derive(EnumIter)]
+pub enum Entities {
+    SchemaType,
+    Image,
+    Relation,
+    Text,
+    Date,
+    WebUrl,
+    SpaceConfiguration,
+    TableBlock,
+    TextBlock,
+    ImageBlock,
+    Attribute,
+}
+
+impl Entities {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Entities::SchemaType => "d7ab4092-0ab5-441e-88c3-5c27952de773",
+            Entities::Image => "ba4e4146-0010-499d-a0a3-caaa7f579d0e",
+            Entities::Relation => "14611456-b466-4cab-920d-2245f59ce828",
+            Entities::Text => "9edb6fcc-e454-4aa5-8611-39d7f024c010",
+            Entities::Date => "167664f6-68f8-40e1-976b-20bd16ed8d47",
+            Entities::WebUrl => "dfc221d9-8cce-4f0b-9353-e437a98387e3",
+            Entities::SpaceConfiguration => "1d5d0c2a-db23-466c-a0b0-9abe879df457",
+            Entities::TableBlock => "88d59252-17ae-4d9a-a367-24710129eb47",
+            Entities::TextBlock => "8426caa1-43d6-47d4-a6f1-00c7c1a9a320",
+            Entities::ImageBlock => "f0553d4d-4838-425e-bcd7-613bd8f475a5",
+            Entities::Attribute => "attribute",
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Entities::SchemaType => "Type",
+            Entities::Image => "Image",
+            Entities::Relation => "Relation",
+            Entities::Text => "Text",
+
+            Entities::Date => "Date",
+            Entities::WebUrl => "Web URL",
+            Entities::SpaceConfiguration => "Space Configuration",
+            Entities::TableBlock => "Table Block",
+            Entities::TextBlock => "Text Block",
+            Entities::ImageBlock => "Image Block",
+            Entities::Attribute => "Attribute",
+        }
+    }
+
+    pub fn attributes(&self) -> Vec<Attributes> {
+        match self {
+            Entities::SchemaType => vec![Attributes::Attribute],
+            Entities::SpaceConfiguration => vec![Attributes::ForeignTypes],
+            Entities::ImageBlock => vec![Attributes::Image, Attributes::ParentEntity],
+            Entities::TextBlock => vec![Attributes::MarkdownContent, Attributes::ParentEntity],
+            Entities::TableBlock => vec![Attributes::RowType, Attributes::ParentEntity],
+            _ => vec![],
         }
     }
 }
+
+pub const ROOT_SPACE_ADDRESS: &'static str = "0x170b749413328ac9a94762031a7a05b00c1d2e34";
 
 /*
  export const IMAGE_ATTRIBUTE = '457a27af-7b0b-485c-ac07-aa37756adafa'

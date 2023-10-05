@@ -10,8 +10,8 @@ publish = false
 members = [".", "sink", "migration", "entity"]
 
 [dependencies]
-#geo = { path = "sink" , features = ["experimental_queries"]}
-geo = { path = "sink" }
+geo = { path = "sink" , features = ["experimental_queries"]}
+#geo = { path = "sink" }
 entity = { path = "entity" }
 tokio = { version = "1.27", features = ["time", "sync", "macros", "test-util", "rt-multi-thread", "parking_lot"] }
 anyhow = "1"

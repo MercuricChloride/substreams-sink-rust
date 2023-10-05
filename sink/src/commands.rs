@@ -7,7 +7,7 @@ pub struct Args {
     /// Substreams command
     pub command: Commands,
     /// Substreams endpoint
-    #[arg(short, long, env = "SUBSTREAMS_ENDPOINT")]
+    #[arg(long, env = "SUBSTREAMS_ENDPOINT")]
     pub substreams_endpoint: String,
 
     /// Path or link to spkg
@@ -19,7 +19,7 @@ pub struct Args {
     pub module: String,
 
     /// Postgres host
-    #[arg(short, long, env = "POSTGRES_HOST")]
+    #[arg(long, env = "POSTGRES_HOST")]
     pub host: String,
 
     /// Postgres username
@@ -50,17 +50,12 @@ pub struct Args {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     Deploy {
-        #[arg(short, long)]
         #[clap(index = 1)]
         /// Space addresses to listen to. Note this will index all subspaces of the provided spaces.
         spaces: Vec<String>,
     },
     DeployGlobal {
-        #[arg(
-            short,
-            long,
-            default_value = "0x170b749413328ac9a94762031a7a05b00c1d2e34"
-        )]
+        #[arg(default_value = "0x170b749413328ac9a94762031a7a05b00c1d2e34")]
         #[clap(index = 1)]
         /// The root space address
         root_space_address: String,

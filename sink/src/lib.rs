@@ -1,13 +1,11 @@
 use anyhow::{format_err, Context, Error};
 use clap::Parser;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
 use dotenv::dotenv;
-use futures03::future::try_join_all;
-use futures03::stream::{FuturesOrdered, FuturesUnordered};
 use futures03::{future::join_all, StreamExt};
 use futures03::{Future, TryStreamExt};
 use gui::{controls_handle, ui, GuiData, StatefulList};
 use migration::DbErr;
+use models::triples::bootstrap;
 use pb::schema::EntryAdded;
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
 use pb::sf::substreams::v1::Package;
@@ -63,6 +61,7 @@ mod triples;
 pub mod tui;
 
 pub const MAX_CONNECTIONS: usize = 499;
+//pub const MAX_CONNECTIONS: usize = 1;
 
 pub async fn main() -> Result<(), Error> {
     // load the .env file
@@ -83,9 +82,9 @@ pub async fn main() -> Result<(), Error> {
         gui,
     } = Args::parse();
 
-    let start_block = 36472425;
+    //let start_block = 36472425;
+    let start_block = 36800000;
     let stop_block = 47942548;
-    //let stop_block = 36473425;
 
     let package = read_package(&package_file).await?;
     let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, Some(token)).await?);
@@ -96,8 +95,13 @@ pub async fn main() -> Result<(), Error> {
         "postgres://{username}:{password}@{host}/{database}"
     ));
     connection_options.max_connections(MAX_CONNECTIONS as u32);
+    connection_options.connect_timeout(Duration::from_secs(60));
+    connection_options.idle_timeout(Duration::from_secs(60));
 
     let db: Arc<DatabaseConnection> = Arc::new(Database::connect(connection_options).await?);
+
+    // bootstrap the database
+    bootstrap(&db).await?;
 
     let cursor: Option<String> = cursor::get(&db).await?;
 
@@ -113,7 +117,7 @@ pub async fn main() -> Result<(), Error> {
 
     if !gui {
         // spawn a concurrent process to handle the substream data
-        let (tx, mut rx) = channel::<Action>(200);
+        let (tx, mut rx) = channel::<Action>(10000);
 
         let receiver_task = async {
             let mut start;
@@ -240,7 +244,7 @@ async fn process_block_scoped_data(
 
 // This function should only use a single connection to the database
 // We might want to make this function more concurrent, but we will see.
-async fn handle_action(action: Action, db: Arc<DatabaseConnection>) -> Result<(), Error> {
+async fn handle_action(action: Action, db: Arc<DatabaseConnection>) -> Result<(), DbErr> {
     action.execute_action_triples(&db).await?;
     println!("Action triples added to db");
 
@@ -257,14 +261,14 @@ async fn handle_action(action: Action, db: Arc<DatabaseConnection>) -> Result<()
 /// This function is very similar to `handle_action`, however it is used to only perform the actions
 /// for running the global, stripped down version of the sink.
 /// So it operates on different sink actions etc.
-async fn handle_global_action(action: Action, db: Arc<DatabaseConnection>) -> Result<(), Error> {
+async fn handle_global_action(action: Action, db: Arc<DatabaseConnection>) -> Result<(), DbErr> {
     //action.execute_action_triples(&db).await?;
     //println!("Action triples added to db");
 
     action.add_author_to_db(&db).await?;
     println!("Author added to db");
 
-    let sink_actions = action.get_sink_actions();
+    let sink_actions = action.get_global_sink_actions();
     handle_sink_actions(sink_actions, &db).await?;
     println!("Sink actions handled");
 
