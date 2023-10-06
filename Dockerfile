@@ -27,6 +27,23 @@ COPY . .
 # Build the project. This step will now only rebuild if something other than Cargo.toml and Cargo.lock has changed.
 RUN cargo build --release
 
+ARG SUBSTREAMS_ENDPOINT
+ENV SUBSTREAMS_ENDPOINT=$SUBSTREAMS_ENDPOINT
+
+ARG DATABASE_URL
+ENV DATABASE_URL=$DATABASE_URL
+
+ARG SUBSTREAMS_API_TOKEN
+ENV SUBSTREAMS_API_TOKEN=$SUBSTREAMS_API_TOKEN
+
+ARG MAX_CONNECTIONS
+ENV MAX_CONNECTIONS=$MAX_CONNECTIONS
+
+RUN echo $SUBSTREAMS_ENDPOINT
+RUN echo $DATABASE_URL
+RUN echo $SUBSTREAMS_API_TOKEN
+RUN echo $MAX_CONNECTIONS
+
 # Create a new stage with a smaller base image to reduce final image size
 FROM debian:bullseye-slim
 
