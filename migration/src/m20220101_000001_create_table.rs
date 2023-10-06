@@ -53,8 +53,6 @@ impl MigrationTrait for Migration {
         //     ))
         //     .await?;
 
-
-
         // create the cursors table
         manager
             .create_table(
@@ -430,6 +428,27 @@ impl MigrationTrait for Migration {
         let bootstrap_root_space_defined_in =
             format!("UPDATE \"public\".\"entities\" set \"defined_in\" = ('0x170b749413328ac9a94762031a7a05b00c1d2e34') WHERE \"id\" = 'root_space'");
 
+        //iterate over each new table and disable triggers
+        let tables = manager
+            .get_connection()
+            .query_all(Statement::from_string(
+                DatabaseBackend::Postgres,
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+            ))
+            .await?;
+
+        for table in tables {
+            let table_name = table.try_get_by_index::<String>(0).unwrap();
+            println!("Disabling triggers for table {}", table_name);
+            let query = format!(
+                "ALTER TABLE \"public\".\"{}\" DISABLE TRIGGER ALL;",
+                table_name
+            );
+
+            connection
+                .execute(Statement::from_string(DatabaseBackend::Postgres, query))
+                .await?;
+        }
 
         connection
             .execute(Statement::from_string(
