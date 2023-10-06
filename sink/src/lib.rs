@@ -54,11 +54,11 @@ pub mod gui;
 pub mod models;
 pub mod pb;
 pub mod persist;
+pub mod retry;
 pub mod sink_actions;
 pub mod substreams;
 pub mod substreams_stream;
 pub mod triples;
-pub mod retry;
 pub mod tui;
 
 pub const MAX_CONNECTIONS: usize = 499;
@@ -66,9 +66,7 @@ pub const MAX_CONNECTIONS: usize = 499;
 
 pub async fn main() -> Result<(), Error> {
     // load the .env file
-    dotenv().expect(
-        "Couldn't load .env file, please make sure it exists in the root directory of the project.",
-    );
+    dotenv().ok();
 
     let Args {
         command,
