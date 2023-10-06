@@ -31,28 +31,6 @@ impl MigrationTrait for Migration {
         // create the cursors table
         let connection: &SchemaManagerConnection = &manager.get_connection();
 
-        // disable all foreign key checks
-        // connection
-        //     .execute(Statement::from_string(
-        //         DatabaseBackend::Postgres,
-        //         "SET session_replication_role = 'replica';",
-        //     ))
-        //     .await?;
-
-        // connection
-        //     .execute(Statement::from_string(
-        //         DatabaseBackend::Postgres,
-        //         "ALTER SYSTEM SET session_replication_role TO 'replica';",
-        //     ))
-        //     .await?;
-
-        // connection
-        //     .execute(Statement::from_string(
-        //         DatabaseBackend::Postgres,
-        //         "SELECT pg_reload_conf();",
-        //     ))
-        //     .await?;
-
         // create the cursors table
         manager
             .create_table(
@@ -416,9 +394,6 @@ impl MigrationTrait for Migration {
         let root_space_query =
             format!("CREATE SCHEMA IF NOT EXISTS \"0x170b749413328ac9a94762031a7a05b00c1d2e34\";");
 
-        let table_query =
-            format!("CREATE TABLE IF NOT EXISTS \"0x170b749413328ac9a94762031a7a05b00c1d2e34\".\"FOO\" (id text);");
-
         let bootstrap_root_space_entity =
             format!("INSERT INTO \"public\".\"entities\" (\"id\") VALUES ('root_space');");
 
@@ -460,13 +435,6 @@ impl MigrationTrait for Migration {
         connection
             .execute(Statement::from_string(
                 DatabaseBackend::Postgres,
-                table_query,
-            ))
-            .await?;
-
-        connection
-            .execute(Statement::from_string(
-                DatabaseBackend::Postgres,
                 bootstrap_root_space_entity,
             ))
             .await?;
@@ -477,14 +445,6 @@ impl MigrationTrait for Migration {
                 bootstrap_root_space,
             ))
             .await?;
-
-        // disable all foreign key checks
-        // connection
-        //     .execute(Statement::from_string(
-        //         DatabaseBackend::Postgres,
-        //         "SET session_replication_role = 'origin';",
-        //     ))
-        //     .await?;
 
         connection
             .execute(Statement::from_string(

@@ -135,7 +135,7 @@ pub mod entities {
                     DbBackend::Postgres,
                     table_disable_statement.clone(),
                 ))
-                .await;
+                .await?;
                 if let Ok(result) = result {
                     table_create_result = Some(result);
                 } else if retry_count == 3 {

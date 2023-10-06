@@ -61,8 +61,10 @@ pub mod substreams_stream;
 pub mod triples;
 pub mod tui;
 
-pub const MAX_CONNECTIONS: usize = 499;
-//pub const MAX_CONNECTIONS: usize = 1;
+// The max connections in postgres, by default, is 100. I keep 1 connection open for db viewing.
+// increase this to parallelize the db interactions
+// @GOOSE MAKE THIS CONFIGURABLE BY ENV USING LAZY STATIC
+pub const MAX_CONNECTIONS: usize = 99;
 
 pub async fn main() -> Result<(), Error> {
     // load the .env file
@@ -290,6 +292,13 @@ async fn read_package(input: &str) -> Result<Package, anyhow::Error> {
     }
 
     // Assume it's a local file
+
+    // log out local files in current directory
+
+    let mut files = std::fs::read_dir(".").unwrap();
+    while let Some(file) = files.next() {
+        println!("{}", file.unwrap().path().display());
+    }
 
     let content =
         std::fs::read(input).context(format_err!("read package from file '{}'", input))?;

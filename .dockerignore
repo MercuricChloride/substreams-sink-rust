@@ -1,1 +1,6 @@
-.env
+# .dockerignore
+*.log
+*.tmp
+.git/
+target/
+**/*.bak
