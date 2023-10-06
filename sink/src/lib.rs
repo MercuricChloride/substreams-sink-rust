@@ -54,21 +54,21 @@ pub mod gui;
 pub mod models;
 pub mod pb;
 pub mod persist;
+pub mod retry;
 pub mod sink_actions;
 pub mod substreams;
 pub mod substreams_stream;
 pub mod triples;
-pub mod retry;
 pub mod tui;
 
-pub const MAX_CONNECTIONS: usize = 499;
-//pub const MAX_CONNECTIONS: usize = 1;
+// The max connections in postgres, by default, is 100. I keep 1 connection open for db viewing.
+// increase this to parallelize the db interactions
+// @GOOSE MAKE THIS CONFIGURABLE BY ENV USING LAZY STATIC
+pub const MAX_CONNECTIONS: usize = 99;
 
 pub async fn main() -> Result<(), Error> {
     // load the .env file
-    dotenv().expect(
-        "Couldn't load .env file, please make sure it exists in the root directory of the project.",
-    );
+    dotenv().ok();
 
     let Args {
         command,
@@ -76,10 +76,7 @@ pub async fn main() -> Result<(), Error> {
         spkg: package_file,
         module: module_name,
         token,
-        host,
-        username,
-        password,
-        database,
+        database_url,
         gui,
     } = Args::parse();
 
@@ -92,9 +89,7 @@ pub async fn main() -> Result<(), Error> {
 
     // the reason for the long timeout is because any interactions with the db will be blocking if the db can't
     // handle any more connections at once.
-    let mut connection_options = ConnectOptions::new(format!(
-        "postgres://{username}:{password}@{host}/{database}"
-    ));
+    let mut connection_options = ConnectOptions::new(database_url);
     connection_options.max_connections(MAX_CONNECTIONS as u32);
     connection_options.connect_timeout(Duration::from_secs(60));
     connection_options.idle_timeout(Duration::from_secs(60));
@@ -290,8 +285,6 @@ async fn read_package(input: &str) -> Result<Package, anyhow::Error> {
     if input.starts_with("http") {
         return read_http_package(input).await;
     }
-
-    // Assume it's a local file
 
     let content =
         std::fs::read(input).context(format_err!("read package from file '{}'", input))?;

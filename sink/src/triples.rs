@@ -70,7 +70,10 @@ impl Action {
         let mut chunk = Vec::new();
         for action_triple in self.actions.iter() {
             if action_triple.is_missing_data() {
-                println!("Missing data in action triple: {:?} in action: {:?}", action_triple, self);
+                println!(
+                    "Missing data in action triple: {:?} in action: {:?}",
+                    action_triple, self
+                );
                 continue;
             }
 
@@ -173,6 +176,9 @@ impl Action {
 
                 // check if we have a locally cached version of the file
                 let path = format!("./ipfs-data/{}.json", cid);
+
+                // create the directory if it doesn't exist
+                let _ = std::fs::create_dir("./ipfs-data");
 
                 if let Ok(data) = std::fs::read_to_string(&path) {
                     let space = &entry.space;
@@ -332,7 +338,6 @@ impl TryFrom<ActionTriple> for SinkAction {
 }
 
 impl ActionTriple {
-
     pub fn is_missing_data(&self) -> bool {
         match self {
             ActionTriple::CreateEntity { entity_id, .. } => entity_id.is_empty(),
@@ -350,7 +355,6 @@ impl ActionTriple {
             } => entity_id.is_empty() || attribute_id.is_empty() || value.id().is_empty(),
         }
     }
-
 
     /// This method includes the action_triple in the database
     pub async fn execute(&self, db: &DatabaseConnection) -> Result<(), DbErr> {

@@ -114,19 +114,35 @@ pub mod entities {
                 space = space,
                 entity_id = entity_id
             );
+
+            let table_disable_statement = format!(
+                "ALTER TABLE \"{space}\".\"{entity_id}\" DISABLE TRIGGER ALL;",
+                space = space,
+                entity_id = entity_id
+            );
             let mut table_create_result = None;
 
             let mut retry_count = 0;
 
             while let None = table_create_result {
-                let result = db.execute(Statement::from_string(
-                                DbBackend::Postgres,
-                                table_create_statement.clone(),
-                            )).await;
+                let result = db
+                    .execute(Statement::from_string(
+                        DbBackend::Postgres,
+                        table_create_statement.clone(),
+                    ))
+                    .await;
+                db.execute(Statement::from_string(
+                    DbBackend::Postgres,
+                    table_disable_statement.clone(),
+                ))
+                .await?;
                 if let Ok(result) = result {
                     table_create_result = Some(result);
                 } else if retry_count == 3 {
-                    println!("Couldn't create table for entity {} for space {}. \n\n {:?}", entity_id, space, result);
+                    println!(
+                        "Couldn't create table for entity {} for space {}. \n\n {:?}",
+                        entity_id, space, result
+                    );
                 } else {
                     retry_count += 1;
                 }
@@ -137,10 +153,17 @@ pub mod entities {
                 if let Some(entity_name) = entity.name {
                     let table_comment = table_comment_string(space, entity_id, &entity_name);
 
-                    let result = db.execute(Statement::from_string(DbBackend::Postgres, table_comment.clone()))
+                    let result = db
+                        .execute(Statement::from_string(
+                            DbBackend::Postgres,
+                            table_comment.clone(),
+                        ))
                         .await;
                     if let Err(err) = result {
-                        println!("Couldn't add comment to table for entity {} for space {}. \n\n {:?}", entity_id, space, err);
+                        println!(
+                            "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
+                            entity_id, space, err
+                        );
                         println!("Comment: {}", table_comment);
                     }
                 }
@@ -313,10 +336,17 @@ pub mod entities {
 
                     let table_comment = table_comment_string(&space, &entity_id, &entity_name);
 
-                    let result = db.execute(Statement::from_string(DbBackend::Postgres, table_comment.clone()))
+                    let result = db
+                        .execute(Statement::from_string(
+                            DbBackend::Postgres,
+                            table_comment.clone(),
+                        ))
                         .await;
                     if let Err(err) = result {
-                        println!("Couldn't add comment to table for entity {} for space {}. \n\n {:?}", entity_id, space, err);
+                        println!(
+                            "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
+                            entity_id, space, err
+                        );
                         println!("Comment: {}", table_comment);
                     }
                 }
@@ -877,5 +907,3 @@ pub mod actions {
         Ok(())
     }
 }
-
-

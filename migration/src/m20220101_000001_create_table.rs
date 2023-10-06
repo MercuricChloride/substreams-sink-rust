@@ -31,30 +31,6 @@ impl MigrationTrait for Migration {
         // create the cursors table
         let connection: &SchemaManagerConnection = &manager.get_connection();
 
-        // disable all foreign key checks
-        // connection
-        //     .execute(Statement::from_string(
-        //         DatabaseBackend::Postgres,
-        //         "SET session_replication_role = 'replica';",
-        //     ))
-        //     .await?;
-
-        // connection
-        //     .execute(Statement::from_string(
-        //         DatabaseBackend::Postgres,
-        //         "ALTER SYSTEM SET session_replication_role TO 'replica';",
-        //     ))
-        //     .await?;
-
-        // connection
-        //     .execute(Statement::from_string(
-        //         DatabaseBackend::Postgres,
-        //         "SELECT pg_reload_conf();",
-        //     ))
-        //     .await?;
-
-
-
         // create the cursors table
         manager
             .create_table(
@@ -418,9 +394,6 @@ impl MigrationTrait for Migration {
         let root_space_query =
             format!("CREATE SCHEMA IF NOT EXISTS \"0x170b749413328ac9a94762031a7a05b00c1d2e34\";");
 
-        let table_query =
-            format!("CREATE TABLE IF NOT EXISTS \"0x170b749413328ac9a94762031a7a05b00c1d2e34\".\"FOO\" (id text);");
-
         let bootstrap_root_space_entity =
             format!("INSERT INTO \"public\".\"entities\" (\"id\") VALUES ('root_space');");
 
@@ -430,18 +403,32 @@ impl MigrationTrait for Migration {
         let bootstrap_root_space_defined_in =
             format!("UPDATE \"public\".\"entities\" set \"defined_in\" = ('0x170b749413328ac9a94762031a7a05b00c1d2e34') WHERE \"id\" = 'root_space'");
 
+        //iterate over each new table and disable triggers
+        let tables = manager
+            .get_connection()
+            .query_all(Statement::from_string(
+                DatabaseBackend::Postgres,
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'",
+            ))
+            .await?;
+
+        for table in tables {
+            let table_name = table.try_get_by_index::<String>(0).unwrap();
+            println!("Disabling triggers for table {}", table_name);
+            let query = format!(
+                "ALTER TABLE \"public\".\"{}\" DISABLE TRIGGER ALL;",
+                table_name
+            );
+
+            connection
+                .execute(Statement::from_string(DatabaseBackend::Postgres, query))
+                .await?;
+        }
 
         connection
             .execute(Statement::from_string(
                 DatabaseBackend::Postgres,
                 root_space_query,
-            ))
-            .await?;
-
-        connection
-            .execute(Statement::from_string(
-                DatabaseBackend::Postgres,
-                table_query,
             ))
             .await?;
 
@@ -458,14 +445,6 @@ impl MigrationTrait for Migration {
                 bootstrap_root_space,
             ))
             .await?;
-
-        // disable all foreign key checks
-        // connection
-        //     .execute(Statement::from_string(
-        //         DatabaseBackend::Postgres,
-        //         "SET session_replication_role = 'origin';",
-        //     ))
-        //     .await?;
 
         connection
             .execute(Statement::from_string(

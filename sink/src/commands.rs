@@ -18,26 +18,8 @@ pub struct Args {
     #[arg(short, long, default_value = "map_entries_added")]
     pub module: String,
 
-    /// Postgres host
-    #[arg(long, env = "POSTGRES_HOST")]
-    pub host: String,
-
-    /// Postgres username
-    #[arg(short, long, env = "POSTGRES_USER")]
-    pub username: String,
-
-    /// Postgres password
-    #[arg(short, long, env = "POSTGRES_PASSWORD")]
-    pub password: String,
-
-    /// Postgres database
-    #[arg(short, long, env = "POSTGRES_DATABASE")]
-    pub database: String,
-
-    /// Postgres port, default 5432
-    //#[arg(short, long, default_value = "5432")]
-    //pub port: String,
-
+    #[arg(short, long, env = "DATABASE_URL")]
+    pub database_url: String,
     /// Substreams API token, if not provided, SUBSTREAMS_API_TOKEN environment variable will be used
     #[arg(short, long, env = "SUBSTREAMS_API_TOKEN")]
     pub token: String,
