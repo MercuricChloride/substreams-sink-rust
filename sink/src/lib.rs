@@ -76,10 +76,7 @@ pub async fn main() -> Result<(), Error> {
         spkg: package_file,
         module: module_name,
         token,
-        host,
-        username,
-        password,
-        database,
+        database_url,
         gui,
     } = Args::parse();
 
@@ -92,9 +89,7 @@ pub async fn main() -> Result<(), Error> {
 
     // the reason for the long timeout is because any interactions with the db will be blocking if the db can't
     // handle any more connections at once.
-    let mut connection_options = ConnectOptions::new(format!(
-        "postgres://{username}:{password}@{host}/{database}"
-    ));
+    let mut connection_options = ConnectOptions::new(database_url);
     connection_options.max_connections(MAX_CONNECTIONS as u32);
     connection_options.connect_timeout(Duration::from_secs(60));
     connection_options.idle_timeout(Duration::from_secs(60));
