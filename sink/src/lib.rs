@@ -286,15 +286,6 @@ async fn read_package(input: &str) -> Result<Package, anyhow::Error> {
         return read_http_package(input).await;
     }
 
-    // Assume it's a local file
-
-    // log out local files in current directory
-
-    let mut files = std::fs::read_dir(".").unwrap();
-    while let Some(file) = files.next() {
-        println!("{}", file.unwrap().path().display());
-    }
-
     let content =
         std::fs::read(input).context(format_err!("read package from file '{}'", input))?;
     Package::decode(content.as_ref()).context("decode command")
