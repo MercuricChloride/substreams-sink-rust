@@ -28,10 +28,11 @@ impl SubstreamsEndpoint {
         if let Some(t) = &token {
             println!("Token: {}", t);
         }
-        let uri = url
-            .as_ref()
-            .parse::<Uri>()
-            .expect("the url should have been validated by now, so it is a valid Uri");
+        let uri = url.as_ref().parse::<Uri>();
+        if let Err(err) = uri {
+            panic!("invalid uri: {:?}", err);
+        }
+        let uri = uri.unwrap();
 
         let endpoint = match uri.scheme().unwrap_or(&Scheme::HTTP).as_str() {
             "http" => Channel::builder(uri),

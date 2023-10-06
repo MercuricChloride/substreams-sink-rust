@@ -19,6 +19,8 @@ RUN mkdir -p src entity/src sink/src migration/src && \
     cargo build --release && \
     rm -r src entity/src sink/src migration/src
 
+RUN cargo install sea-orm-cli
+
 # Now copy the entire project
 COPY . .
 
@@ -37,7 +39,12 @@ WORKDIR /usr/local/bin
 
 # Copy the binary from the builder stage to the current stage
 COPY --from=builder /usr/src/geo-substream-sink/target/release/geo-substream-sink .
-COPY substream.spkg . 
+COPY --from=builder /usr/local/cargo/bin/sea-orm-cli /usr/local/bin/
 
-# Set the command to run when the Docker image starts
-CMD ["./geo-substream-sink", "deploy-global"]
+COPY substream.spkg . 
+COPY entrypoint.sh .
+
+
+
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["deploy-global"]
