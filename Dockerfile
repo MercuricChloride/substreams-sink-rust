@@ -44,7 +44,5 @@ COPY --from=builder /usr/local/cargo/bin/sea-orm-cli /usr/local/bin/
 COPY substream.spkg . 
 COPY entrypoint.sh .
 
-
-
 ENTRYPOINT ["./entrypoint.sh"]
 CMD ["deploy-global"]
