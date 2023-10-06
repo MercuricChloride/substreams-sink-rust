@@ -1,3 +1,16 @@
+# Quickstart
+
+Development environment setup:
+
+1. cargo install
+2. sea migrate up
+3. cargo run --release deploy-global
+
+# Local Docker Setup d
+
+1. docker build -t geo .
+2. docker run --env-file=.env geo
+
 # IMPORTANT
 
 AFTER CLONING THIS REPO, YOU MUST PULL IN THE SUBMODULES
@@ -6,10 +19,12 @@ Use this command to do so:
 
 `git submodule update --init --recursive`
 
-Failure to do so will mean you won't have the subgraph cloned and the sink will not work 
+Failure to do so will mean you won't have the subgraph cloned and the sink will not work
 
 # Yaniv Notes
+
 Test Cases:
+
 - Create first space
 - Entity creation for that space
 - Modification of those triples
