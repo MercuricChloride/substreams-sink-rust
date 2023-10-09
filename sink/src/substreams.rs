@@ -24,10 +24,6 @@ impl Display for SubstreamsEndpoint {
 
 impl SubstreamsEndpoint {
     pub async fn new<S: AsRef<str>>(url: S, token: Option<String>) -> Result<Self, anyhow::Error> {
-        println!("URL: {}", url.as_ref());
-        if let Some(t) = &token {
-            println!("Token: {}", t);
-        }
         let uri = url.as_ref().parse::<Uri>();
         if let Err(err) = uri {
             panic!("invalid uri: {:?}", err);
