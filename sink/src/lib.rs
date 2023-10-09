@@ -555,8 +555,8 @@ mod tests {
                 handle_action(action, db.clone(), true, max_connections as usize)
                     .await
                     .unwrap();
-                start_block += 1;
             }
+            start_block += 1;
         }
 
         std::fs::write(

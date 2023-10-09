@@ -17,6 +17,8 @@ END $$;
                     )
 }
 
+
+
 pub mod spaces {
     use entity::spaces::*;
     use migration::{DbErr, OnConflict};
@@ -274,6 +276,20 @@ pub mod entities {
                     column_add_statement,
                 ))
                 .await?;
+
+                let column_name_statement = format!(
+                    "COMMENT ON COLUMN \"{space}\".\"{child_entity}\".\"parent_{parent_entity}\" IS E'@name {parent_name}';",
+                    space = space,
+                    child_entity = child_entity.id,
+                    parent_entity = parent_entity.id,
+                    parent_name = parent_entity.name.unwrap_or(parent_entity_id.to_string())
+                );
+
+                db.execute(Statement::from_string(
+                    DbBackend::Postgres,
+                    column_name_statement
+                ))
+                .await?;
             } else {
                 panic!("DOESN'T EXIST");
             }
@@ -288,7 +304,7 @@ pub mod entities {
             }
             let attribute = attribute.unwrap();
 
-            let attribute_name = attribute.name.unwrap();
+            let attribute_name = attribute.name.unwrap_or(attribute.id);
             // otherwise we just need to add a column with text
             let column_add_statement = format!(
                 "ALTER TABLE \"{space}\".\"{entity}\" ADD COLUMN IF NOT EXISTS \"{attribute}\" TEXT;",
@@ -302,7 +318,21 @@ pub mod entities {
                 column_add_statement,
             ))
             .await?;
+            let column_name_statement = format!(
+                "COMMENT ON COLUMN \"{space}\".\"{entity}\".\"{attribute}\" IS E'@name {attribute}';",
+                space = space,
+                entity = parent_entity_id,
+                attribute = attribute_name,
+            );
+
+            db.execute(Statement::from_string(
+                DbBackend::Postgres,
+                column_name_statement
+            ))
+            .await?;
         }
+
+
         Ok(())
     }
 
@@ -459,6 +489,36 @@ pub mod entities {
                     }
                 }
             }
+
+            // if the entity is an attribute, we need to rename all of the columns that have the name of: "parent_{entity_id}"
+            let tables_query = format!(
+                "SELECT table_name
+                FROM information_schema.columns
+                WHERE column_name = 'parent_{entity_id}';",
+            );
+
+            let tables = db.query_all(Statement::from_string(
+                DbBackend::Postgres,
+                tables_query,
+            )).await?;
+
+            for table in tables {
+                let table_name: String = table.try_get_by_index(0 as usize).unwrap();
+                let column_name_statement = format!(
+                    "COMMENT ON COLUMN \"{space}\".\"{table_name}\".\"parent_{entity_id}\" IS E'@name {name}';",
+                    space = space,
+                    table_name = table_name,
+                    entity_id = entity_id,
+                    name = name
+                );
+
+                db.execute(Statement::from_string(
+                    DbBackend::Postgres,
+                    column_name_statement
+                ))
+                .await?;
+            }
+
         }
 
         Ok(())
