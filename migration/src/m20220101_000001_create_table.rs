@@ -1,11 +1,9 @@
 use futures03::{
     future::try_join_all,
-    stream::{FuturesOrdered, FuturesUnordered},
-    StreamExt,
 };
 use sea_orm_migration::{
     prelude::*,
-    sea_orm::{DatabaseBackend, DbBackend, Statement},
+    sea_orm::{DatabaseBackend, Statement},
 };
 
 macro_rules! drop_table {
@@ -53,7 +51,7 @@ impl MigrationTrait for Migration {
         connection
             .execute(Statement::from_string(
                 DatabaseBackend::Postgres,
-                "COMMENT ON TABLE \"public\".\"cursors\" IS E'@name coolCursors';",
+                "COMMENT ON TABLE \"public\".\"cursors\" IS E'@name substreamCursor';",
             ))
             .await?;
 
@@ -68,6 +66,11 @@ impl MigrationTrait for Migration {
                             .text()
                             .unique_key()
                             .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(Accounts::Avatar)
+                            .text()
+                            .null()
                     )
                     .to_owned(),
             )
@@ -133,7 +136,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Entities::Name).string())
                     .col(ColumnDef::new(Entities::Description).string())
                     .col(ColumnDef::new(Entities::IsType).boolean().default(false))
-                    .col(ColumnDef::new(Entities::DefinedIn).text().null())
+                    .col(ColumnDef::new(Entities::DefinedIn).text().not_null())
                     .col(ColumnDef::new(Entities::ValueType).text())
                     .col(ColumnDef::new(Entities::Version).text())
                     .col(ColumnDef::new(Entities::Versions).array(ColumnType::Text))
@@ -199,13 +202,14 @@ impl MigrationTrait for Migration {
                     .table(Spaces::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Spaces::Id).text().unique_key().primary_key())
-                    .col(ColumnDef::new(Spaces::Address).text().unique_key())
+                    .col(ColumnDef::new(Spaces::Address).text().unique_key().not_null())
                     .col(ColumnDef::new(Spaces::CreatedAtBlock).text())
                     .col(ColumnDef::new(Spaces::IsRootSpace).boolean())
                     .col(ColumnDef::new(Spaces::Admins).text())
                     .col(ColumnDef::new(Spaces::EditorControllers).text())
                     .col(ColumnDef::new(Spaces::Editors).text())
                     .col(ColumnDef::new(Spaces::Entity).text())
+                    .col(ColumnDef::new(Spaces::Cover).text().null())
                     .foreign_key(
                         ForeignKey::create()
                             .name("spaces_id_entity_id_fkey")
@@ -395,13 +399,10 @@ impl MigrationTrait for Migration {
             format!("CREATE SCHEMA IF NOT EXISTS \"0x170b749413328ac9a94762031a7a05b00c1d2e34\";");
 
         let bootstrap_root_space_entity =
-            format!("INSERT INTO \"public\".\"entities\" (\"id\") VALUES ('root_space');");
+            format!("INSERT INTO \"public\".\"entities\" (\"id\", \"defined_in\") VALUES ('root_space', '0x170b749413328ac9a94762031a7a05b00c1d2e34');");
 
         let bootstrap_root_space =
             format!("INSERT INTO \"public\".\"spaces\" (\"id\", \"address\", \"is_root_space\") VALUES ('root_space', '0x170b749413328ac9a94762031a7a05b00c1d2e34', true);");
-
-        let bootstrap_root_space_defined_in =
-            format!("UPDATE \"public\".\"entities\" set \"defined_in\" = ('0x170b749413328ac9a94762031a7a05b00c1d2e34') WHERE \"id\" = 'root_space'");
 
         //iterate over each new table and disable triggers
         let tables = manager
@@ -435,13 +436,6 @@ impl MigrationTrait for Migration {
         connection
             .execute(Statement::from_string(
                 DatabaseBackend::Postgres,
-                bootstrap_root_space_entity,
-            ))
-            .await?;
-
-        connection
-            .execute(Statement::from_string(
-                DatabaseBackend::Postgres,
                 bootstrap_root_space,
             ))
             .await?;
@@ -449,7 +443,7 @@ impl MigrationTrait for Migration {
         connection
             .execute(Statement::from_string(
                 DatabaseBackend::Postgres,
-                bootstrap_root_space_defined_in,
+                bootstrap_root_space_entity,
             ))
             .await?;
 
@@ -509,7 +503,7 @@ impl MigrationTrait for Migration {
 
         drop_tables!(
             manager,
-            Cursors,
+            //Cursors,
             Spaces,
             Accounts,
             LogEntries,
@@ -546,6 +540,7 @@ enum Spaces {
     Editors,
     EditorControllers,
     Entity,
+    Cover
 }
 
 #[derive(DeriveIden)]
@@ -565,6 +560,7 @@ enum Entities {
 enum Accounts {
     Table,
     Id,
+    Avatar,
 }
 
 #[derive(DeriveIden)]

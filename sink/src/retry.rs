@@ -1,10 +1,8 @@
 use std::{pin::Pin, time::Duration};
 
-use anyhow::Error;
 use futures03::Future;
 
 use tokio::time::sleep;
-
 
 // Define a type for functions that produce a Future.
 type AsyncFn<T, E> = Box<dyn Fn() -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>> + Send>;

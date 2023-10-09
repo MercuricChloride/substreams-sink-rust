@@ -23,7 +23,6 @@ pub enum Attributes {
     Subspace,
     Cover,
     Avatar,
-    // new types
     Image,
     IndexedSpace,
     ForeignTypes,
@@ -102,55 +101,7 @@ impl Attributes {
             _ => None,
         }
     }
-
 }
-
-    pub async fn bootstrap(db:&DatabaseConnection, author: &String) -> Result<(), Error> {
-        let name_attribute = Attributes::Name.id();
-        let type_attribute = Attributes::Type.id();
-        let attribute_entity = Entities::Attribute.id();
-        let value_type_attribute = Attributes::ValueType.id();
-
-        for attribute in Attributes::iter() {
-            // bootstrap the name of the attribute
-            let entity_id = attribute.id();
-            let value = attribute.name();
-            let value = ValueType::String { id: entity_id.to_string(), value: value.to_string() };
-            let space = ROOT_SPACE_ADDRESS.to_string();
-            triples::create(db, entity_id.into(), name_attribute.into(), value, space.clone(), author.to_string()).await?;
-
-            // bootstrap the attribute to have a type of attribute
-            let value = ValueType::Entity { id: attribute_entity.to_string() };
-            triples::create(db, entity_id.into(), type_attribute.into(), value, space.clone(), author.to_string()).await?;
-
-            // bootstrap the value_type of the attribute if it has one
-            if let Some(value_type) = attribute.value_type() {
-                let value = ValueType::Entity { id: value_type.id().to_string() };
-                triples::create(db, entity_id.into(), value_type_attribute.into(), value, space.clone(), author.to_string()).await?;
-            }
-        }
-
-        for entity in Entities::iter() {
-            // bootstrap the name of the entity
-            let entity_id = entity.id();
-            let value = entity.name();
-            let value = ValueType::String { id: entity_id.to_string(), value: value.to_string() };
-            let space = ROOT_SPACE_ADDRESS.to_string();
-            triples::create(db, entity_id.into(), name_attribute.into(), value, space.clone(), author.to_string()).await?;
-
-            // bootstrap the entity to have a type of schema type
-            let value = ValueType::Entity { id: Entities::SchemaType.id().to_string() };
-            triples::create(db, entity_id.into(), type_attribute.into(), value, space.clone(), author.to_string()).await?;
-
-            for attribute in entity.attributes() {
-                // add the attribute to the entity
-                let value = ValueType::Entity { id: attribute.id().to_string() };
-                triples::create(db, entity_id.into(), attribute_entity.into(), value, space.clone(), author.to_string()).await?;
-            }
-        }
-
-        Ok(())
-    }
 
 /// This is an enum of some useful entities that are used. In geo.
 /// For example the type entity, which is used to give an entity, a type of type.

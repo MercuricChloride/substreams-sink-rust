@@ -1,3 +1,0 @@
-[submodule "external/subgraph"]
-	path = external/subgraph
-	url = https://github.com/MercuricChloride/geo-substream.git

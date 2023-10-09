@@ -88,7 +88,7 @@ fn stream_blocks(
                     println!("Blockstreams connected");
 
                     let mut encountered_error = false;
-                    for await response in stream{
+                    for await response in stream {
                         match process_substreams_response(response).await {
                             BlockProcessedResult::BlockScopedData(block_scoped_data) => {
                                 // Reset backoff because we got a good value from the stream
@@ -108,7 +108,7 @@ fn stream_blocks(
 
                                 latest_cursor = cursor;
                             },
-                            BlockProcessedResult::Skip() => {},
+                            BlockProcessedResult::Skip() => {println!("Got a skip")},
                             BlockProcessedResult::TonicError(status) => {
                                 // Unauthenticated errors are not retried, we forward the error back to the
                                 // stream consumer which handles it
@@ -173,17 +173,17 @@ async fn process_substreams_response(
             // The `ModulesProgress` messages goal is to report active parallel processing happening
             // either to fill up backward (relative to your request's start block) some missing state
             // or pre-process forward blocks (again relative).
-            //
+
             // You could log that in trace or accumulate to push as metrics. Here a snippet of code
             // that prints progress to standard out. If your `BlockScopedData` messages seems to never
             // arrive in production mode, it's because progresses is happening but not yet for the output
             // module you requested.
-            //
-            // let progresses: Vec<_> = progress
-            //     .modules
+
+            // let progresses: Vec<_> = _progress
+            //     .modules_stats
             //     .iter()
             //     .filter_map(|module| {
-            //         use crate::pb::sf::substreams::rpc::v2::module_progress::Type;
+            //         use crate::pb::sf::substreams::rpc::v2::
 
             //         if let Type::ProcessedRanges(range) = module.r#type.as_ref().unwrap() {
             //             Some(format!(
@@ -202,7 +202,7 @@ async fn process_substreams_response(
             //     })
             //     .collect();
 
-            // println!("Progess {}", progresses.join(", "));
+            println!("Progess {:?}", _progress);
 
             BlockProcessedResult::Skip()
         }

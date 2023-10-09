@@ -19,41 +19,23 @@ END $$;
 
 pub mod spaces {
     use entity::spaces::*;
-    use migration::{ConnectionTrait, DbErr, OnConflict};
-    use sea_orm::{ActiveValue, DatabaseConnection, DbBackend, EntityTrait, Statement};
+    use migration::{DbErr, OnConflict};
+    use sea_orm::{ActiveValue, ConnectionTrait, DbBackend, EntityTrait, Statement};
 
-    pub async fn create_schema(db: &DatabaseConnection, schema_name: &String) -> Result<(), DbErr> {
-        if cfg!(not(feature = "experimental_queries")) {
-            return Ok(());
-        } else {
-            //let message = format!("Creating schema {schema_name}");
-            //sender.send(message).await.unwrap();
+    pub async fn create_schema(
+        db: &impl ConnectionTrait,
+        schema_name: &String,
+    ) -> Result<(), DbErr> {
+        let schema_query = format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";");
 
-            let schema_query = format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";");
+        db.execute(Statement::from_string(DbBackend::Postgres, schema_query))
+            .await?;
 
-            db.execute(Statement::from_string(DbBackend::Postgres, schema_query))
-                .await?;
-
-            //let message = format!("Creating table for {schema_name}");
-            //sender.send(message).await.unwrap();
-            //let table_query = format!("CREATE TABLE IF NOT EXISTS\"{schema_name}\".\"FOO\"(id text);");
-
-            // db.execute(Statement::from_string(DbBackend::Postgres, table_query))
-            //     .await?;
-
-            //let message = format!("Inserting test data for table {schema_name}");
-            //sender.send(message).await.unwrap();
-            //let insert = format!("INSERT INTO \"{schema_name}\".\"FOO\" VALUES ('bar');");
-            // db.execute(Statement::from_string(DbBackend::Postgres, insert))
-            //     .await?;
-
-            //drop(sender);
-            Ok(())
-        }
+        Ok(())
     }
 
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         space_id: String,
         address: String,
         created_in_space: String,
@@ -63,7 +45,7 @@ pub mod spaces {
 
         let space = ActiveModel {
             id: ActiveValue::Set(space_id),
-            address: ActiveValue::Set(Some(address)),
+            address: ActiveValue::Set(address),
             ..Default::default()
         };
 
@@ -78,150 +60,260 @@ pub mod spaces {
             .await?;
         Ok(())
     }
+
+    pub async fn upsert_cover(
+        db: &impl ConnectionTrait,
+        space: String,
+        cover_image: String,
+    ) -> Result<(), DbErr> {
+        let space = ActiveModel {
+            id: ActiveValue::Set(space),
+            cover: ActiveValue::Set(Some(cover_image)),
+            ..Default::default()
+        };
+
+        // create the space
+        Entity::insert(space)
+            .on_conflict(
+                OnConflict::column(Column::Id)
+                    .update_column(Column::Cover)
+                    .to_owned(),
+            )
+            .exec(db)
+            .await?;
+        Ok(())
+    }
 }
 
 pub mod entities {
+    use anyhow::Error;
     use entity::{entities::*, entity_attributes, entity_types};
-    use migration::{ConnectionTrait, DbErr, OnConflict};
-    use sea_orm::{
-        ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, DbBackend, EntityTrait,
-        QueryFilter, Statement,
-    };
-    use tokio::sync::mpsc::Sender;
+    use migration::{DbErr, OnConflict};
+    use sea_orm::{ActiveValue, ConnectionTrait, DbBackend, EntityTrait, Statement};
 
-    use crate::retry::Retry;
+    use crate::triples::ValueType;
 
     use super::table_comment_string;
 
-    pub async fn create_table(
-        db: &DatabaseConnection,
-        entity_id: &String,
-        space: &String,
-    ) -> Result<(), DbErr> {
-        if cfg!(not(feature = "experimental_queries")) {
-            return Ok(());
-        } else {
-            println!(
-                "Creating table for entity {} for space {}",
-                entity_id, space
-            );
+    pub async fn create_table(db: &impl ConnectionTrait, entity_id: &String) -> Result<(), Error> {
+        println!("Creating table for entity {}", entity_id);
 
-            let table_create_statement = format!(
-                "CREATE TABLE IF NOT EXISTS \"{space}\".\"{entity_id}\" (
+        let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
+
+        if let None = entity {
+            return Err(Error::msg(format!("Entity {} doesn't exist", entity_id)));
+        }
+        let entity = entity.unwrap();
+
+        let table_create_statement = format!(
+            "CREATE TABLE IF NOT EXISTS \"{space}\".\"{entity_id}\" (
                 id TEXT PRIMARY KEY,
                 entity_id TEXT NOT NULL REFERENCES \"public\".\"entities\"(id)
             );",
-                space = space,
-                entity_id = entity_id
-            );
+            space = entity.defined_in,
+            entity_id = entity_id
+        );
 
-            let table_disable_statement = format!(
-                "ALTER TABLE \"{space}\".\"{entity_id}\" DISABLE TRIGGER ALL;",
-                space = space,
-                entity_id = entity_id
-            );
-            let mut table_create_result = None;
+        let table_disable_statement = format!(
+            "ALTER TABLE \"{space}\".\"{entity_id}\" DISABLE TRIGGER ALL;",
+            space = entity.defined_in,
+            entity_id = entity_id
+        );
 
-            let mut retry_count = 0;
+        let mut table_create_result = None;
 
-            while let None = table_create_result {
-                let result = db
-                    .execute(Statement::from_string(
-                        DbBackend::Postgres,
-                        table_create_statement.clone(),
-                    ))
-                    .await;
-                db.execute(Statement::from_string(
+        let mut retry_count = 0;
+
+        while let None = table_create_result {
+            let result = db
+                .execute(Statement::from_string(
                     DbBackend::Postgres,
-                    table_disable_statement.clone(),
+                    table_create_statement.clone(),
                 ))
-                .await?;
-                if let Ok(result) = result {
-                    table_create_result = Some(result);
-                } else if retry_count == 3 {
-                    println!(
-                        "Couldn't create table for entity {} for space {}. \n\n {:?}",
-                        entity_id, space, result
-                    );
-                } else {
-                    retry_count += 1;
-                }
+                .await;
+
+            db.execute(Statement::from_string(
+                DbBackend::Postgres,
+                table_disable_statement.clone(),
+            ))
+            .await?;
+
+            if let Ok(result) = result {
+                table_create_result = Some(result);
+            } else if retry_count == 3 {
+                println!(
+                    "Couldn't create table for entity {} for space {}. \n\n {:?}",
+                    entity_id, &entity.defined_in, result
+                );
+            } else {
+                retry_count += 1;
             }
-
-            // If the entity has a name, we need to add a comment to the table
-            if let Some(entity) = Entity::find_by_id(entity_id.clone()).one(db).await? {
-                if let Some(entity_name) = entity.name {
-                    let table_comment = table_comment_string(space, entity_id, &entity_name);
-
-                    let result = db
-                        .execute(Statement::from_string(
-                            DbBackend::Postgres,
-                            table_comment.clone(),
-                        ))
-                        .await;
-                    if let Err(err) = result {
-                        println!(
-                            "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
-                            entity_id, space, err
-                        );
-                        println!("Comment: {}", table_comment);
-                    }
-                }
-            }
-
-            //drop(sender);
-            Ok(())
         }
+
+        // If the entity has a name, we need to add a comment to the table
+        if let Some(entity_name) = entity.name {
+            let table_comment = table_comment_string(&entity.defined_in, entity_id, &entity_name);
+
+            let result = db
+                .execute(Statement::from_string(
+                    DbBackend::Postgres,
+                    table_comment.clone(),
+                ))
+                .await;
+            if let Err(err) = result {
+                println!(
+                    "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
+                    entity_id, entity.defined_in, err
+                );
+                println!("Comment: {}", table_comment);
+            }
+        }
+
+        Ok(())
     }
 
     /// This function adds a relation to an entity's table
     /// Because of the way postgraphile works, we need to add the column, with a reference, to the attribute's table
     /// prefixed with "parent_", and a reference to the entity's table, which is the entity-id
     pub async fn add_relation(
-        db: &DatabaseConnection,
-        parent_entity: &String,
-        child_entity: &String,
+        db: &impl ConnectionTrait,
+        parent_entity_id: &String,
+        attribute_id: &String,
+        value: &ValueType,
         space: &String,
-    ) -> Result<(), DbErr> {
-        // let message = format!(
-        //     "Adding relation from child {} to parent {} for space {}",
-        //     child_entity, parent_entity, space
-        // );
-        //sender.send(message).await.unwrap();
+    ) -> Result<(), Error> {
+        let is_relation = match &value {
+            ValueType::Entity { id } => true,
+            _ => false,
+        };
 
-        if cfg!(not(feature = "experimental_queries")) {
-            return Ok(());
-        } else {
+        if is_relation {
+            let child_entity_id = value.id();
             println!(
                 "Adding relation from child {} to parent {} for space {}",
-                child_entity, parent_entity, space
+                child_entity_id, parent_entity_id, space
             );
 
+            // grab the entity of the child
+            let child_entity = Entity::find_by_id(child_entity_id.clone()).one(db).await?;
+
+            if let None = child_entity {
+                return Err(Error::msg(format!(
+                    "Child entity {} doesn't exist",
+                    child_entity_id
+                )));
+            }
+            let child_entity = child_entity.unwrap();
+
+            // grab the entity of the parent
+            let parent_entity = Entity::find_by_id(parent_entity_id.clone()).one(db).await?;
+            if let None = parent_entity {
+                return Err(Error::msg(format!(
+                    "Parent entity {} doesn't exist",
+                    parent_entity_id
+                )));
+            }
+            let parent_entity = parent_entity.unwrap();
+
+            let child_space = child_entity.defined_in;
+            let parent_space = parent_entity.defined_in;
+
+            // check if the table exists
+
+            let child_table_exists_statement = format!(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{space}' AND table_name = '{entity}');",
+                space = child_space,
+                entity = child_entity.id
+            );
+
+            let parent_table_exists_statement = format!(
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{space}' AND table_name = '{entity}');",
+                space = parent_space,
+                entity = parent_entity.id
+            );
+
+            let child_table_result = db
+                .query_one(Statement::from_string(
+                    DbBackend::Postgres,
+                    child_table_exists_statement,
+                ))
+                .await?;
+
+            let parent_table_result = db
+                .query_one(Statement::from_string(
+                    DbBackend::Postgres,
+                    parent_table_exists_statement,
+                ))
+                .await?;
+
+            if let (Some(child_table), Some(parent_table)) =
+                (child_table_result, parent_table_result)
+            {
+                let child_table_exists: bool = child_table.try_get_by_index(0 as usize).unwrap();
+
+                if !child_table_exists {
+                    create_table(db, &child_entity.id).await?;
+                }
+
+                let parent_table_exists: bool = parent_table.try_get_by_index(0 as usize).unwrap();
+
+                if !parent_table_exists {
+                    create_table(db, &parent_entity.id).await?;
+                }
+
+                let column_add_statement = format!(
+                    "ALTER TABLE \"{child_space}\".\"{child_entity}\" ADD COLUMN IF NOT EXISTS \"parent_{parent_entity}\" TEXT REFERENCES \"{parent_space}\".\"{parent_entity}\"(id);",
+                    child_space = child_space,
+                    child_entity = child_entity.id,
+                    parent_space = parent_space,
+                    parent_entity = parent_entity.id
+                );
+
+                db.execute(Statement::from_string(
+                    DbBackend::Postgres,
+                    column_add_statement,
+                ))
+                .await?;
+            } else {
+                panic!("DOESN'T EXIST");
+            }
+        } else {
+            let attribute = Entity::find_by_id(attribute_id.clone()).one(db).await?;
+
+            if let None = attribute {
+                return Err(Error::msg(format!(
+                    "Attribute {} doesn't exist",
+                    attribute_id
+                )));
+            }
+            let attribute = attribute.unwrap();
+
+            let attribute_name = attribute.name.unwrap();
+            // otherwise we just need to add a column with text
             let column_add_statement = format!(
-            "ALTER TABLE \"{space}\".\"{child_entity}\" ADD COLUMN IF NOT EXISTS \"parent_{parent_entity}\" TEXT REFERENCES \"{space}\".\"{parent_entity}\"(id);",
-            space = space,
-            child_entity = child_entity,
-            parent_entity = parent_entity
-        );
+                "ALTER TABLE \"{space}\".\"{entity}\" ADD COLUMN IF NOT EXISTS \"{attribute}\" TEXT;",
+                space = space,
+                entity = parent_entity_id,
+                attribute = attribute_name
+            );
 
             db.execute(Statement::from_string(
                 DbBackend::Postgres,
                 column_add_statement,
             ))
             .await?;
-
-            //drop(sender);
-            Ok(())
         }
+        Ok(())
     }
 
     /// This function handles a type being added to an entity
     /// It populates the type's table with the entity's id
     pub async fn add_type(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         entity_id: &String,
         type_id: &String,
         space: &String,
+        space_queries: bool,
     ) -> Result<(), DbErr> {
         // create the entity and type if they don't exist
         create(db, entity_id.clone(), space.clone()).await?;
@@ -240,21 +332,14 @@ pub mod entities {
             .exec(db)
             .await?;
 
-        if cfg!(not(feature = "experimental_queries")) {
-            return Ok(());
-        } else {
-            //let message = format!("Checking if type {} exists", type_id);
-            //sender.send(message).await.unwrap();
+        if space_queries {
             // grab the space the type is defined in
             let space = Entity::find_by_id(type_id.clone())
                 .one(db)
                 .await?
                 .unwrap()
-                .defined_in
-                .unwrap();
+                .defined_in;
 
-            //let message = format!("Adding type {} to entity {}", type_id, entity_id);
-            //sender.send(message).await.unwrap();
             println!(
                 "Adding type {} to entity {} for space {}",
                 type_id, entity_id, space
@@ -272,46 +357,71 @@ pub mod entities {
                 type_insert_statement,
             ))
             .await?;
-
-            //drop(sender);
-            Ok(())
         }
+
+        Ok(())
     }
 
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         entity_id: String,
         space: String,
     ) -> Result<(), DbErr> {
-        let message = format!("Creating entity {}", entity_id);
-
         let entity = ActiveModel {
             id: ActiveValue::Set(entity_id),
-            defined_in: ActiveValue::Set(Some(space)),
+            defined_in: ActiveValue::Set(space),
             ..Default::default()
         };
 
-        //sender.send(message).await.unwrap();
         Entity::insert(entity)
             .on_conflict(OnConflict::column(Column::Id).do_nothing().to_owned())
             .do_nothing()
             .exec(db)
             .await?;
 
-        //drop(sender);
+        Ok(())
+    }
+
+    pub async fn upsert_value_type(
+        db: &impl ConnectionTrait,
+        entity_id: String,
+        value_type: String,
+        space: String,
+    ) -> Result<(), Error> {
+        // make the entity for the space if it doesn't exist
+        let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
+
+        if let None = entity {
+            return Err(Error::msg("Couldn't add value type as entity doesn't exist"));
+        }
+
+        let entity = entity.unwrap();
+        let mut entity: ActiveModel = entity.into();
+        entity.value_type = ActiveValue::Set(Some(value_type.to_string()));
+
+        Entity::insert(entity)
+            .on_conflict(
+                OnConflict::column(Column::Id)
+                    .update_column(Column::ValueType)
+                    .to_owned(),
+            )
+            .exec(db)
+            .await?;
+
         Ok(())
     }
 
     pub async fn upsert_name(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         entity_id: String,
         name: String,
         space: String,
+        space_queries: bool,
     ) -> Result<(), DbErr> {
         let entity = ActiveModel {
             id: ActiveValue::Set(entity_id.clone()),
             name: ActiveValue::Set(Some(name.clone())),
-            defined_in: ActiveValue::Set(Some(space.clone())),
+            defined_in: ActiveValue::Set(space.clone()),
             ..Default::default()
         };
 
@@ -325,9 +435,7 @@ pub mod entities {
             .await?;
 
         // if the entity is a type, we need to add a comment updating the name of the table
-        if cfg!(not(feature = "experimental_queries")) {
-            return Ok(());
-        } else {
+        if space_queries {
             if let Some(entity) = Entity::find_by_id(entity_id.clone()).one(db).await? {
                 if let (Some(entity_name), Some(is_type)) = (entity.name, entity.is_type) {
                     if !is_type {
@@ -357,20 +465,15 @@ pub mod entities {
     }
 
     pub async fn upsert_description(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         entity_id: String,
         description: String,
         space: String,
     ) -> Result<(), DbErr> {
-        let message = format!(
-            "Upserting description {} for entity {}",
-            description, entity_id
-        );
-
         let entity = ActiveModel {
             id: ActiveValue::Set(entity_id),
             description: ActiveValue::Set(Some(description)),
-            defined_in: ActiveValue::Set(Some(space)),
+            defined_in: ActiveValue::Set(space),
             ..Default::default()
         };
 
@@ -387,11 +490,11 @@ pub mod entities {
     }
 
     pub async fn upsert_is_type(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         entity_id: String,
         is_type: bool,
+        space: &String,
     ) -> Result<(), DbErr> {
-        //let message = format!("Upserting is_type {} for entity {}", is_type, entity_id);
         let entity = Entity::find_by_id(entity_id.to_string()).one(db).await?;
 
         if let Some(entity) = entity {
@@ -406,6 +509,7 @@ pub mod entities {
         let entity = ActiveModel {
             id: ActiveValue::Set(entity_id),
             is_type: ActiveValue::Set(Some(is_type)),
+            defined_in: ActiveValue::Set(space.clone()),
             ..Default::default()
         };
 
@@ -423,16 +527,10 @@ pub mod entities {
 
     /// !!!NOTE!!! attribute_of_id is the id of the entity we are adding an attribute to
     pub async fn add_attribute(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         entity_id: String,
         attribute_of_id: String,
     ) -> Result<(), DbErr> {
-        let message = format!(
-            "Adding attribute {} to entity {}",
-            attribute_of_id, entity_id
-        );
-        //sender.send(message).await.unwrap();
-        //drop(sender);
         let id = uuid::Uuid::new_v4().to_string();
         let entity = entity_attributes::ActiveModel {
             id: ActiveValue::Set(id),
@@ -459,19 +557,14 @@ pub mod cursor {
     use entity::cursors;
     use migration::{DbErr, OnConflict};
     use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait};
-    use tokio::sync::mpsc::Sender;
 
     pub async fn store(
         db: &DatabaseConnection,
         cursor_string: String,
         block_number: u64,
     ) -> Result<(), DbErr> {
-        let message = format!("Checking if cursor exists");
-        //sender.send(message).await.unwrap();
         let cursor = cursors::Entity::find_by_id(0).one(db).await?;
         if let Some(_) = cursor {
-            let message = format!("Updating cursor");
-            //sender.send(message).await.unwrap();
             cursors::Entity::update(cursors::ActiveModel {
                 id: ActiveValue::Set(0),
                 cursor: ActiveValue::Set(cursor_string),
@@ -480,8 +573,6 @@ pub mod cursor {
             .exec(db)
             .await?;
         } else {
-            let message = format!("Creating cursor");
-            //sender.send(message).await.unwrap();
             let cursor = cursors::ActiveModel {
                 id: ActiveValue::Set(0),
                 cursor: ActiveValue::Set(cursor_string),
@@ -499,18 +590,24 @@ pub mod cursor {
                 .await?;
         }
 
-        //drop(sender);
         Ok(())
     }
 
     pub async fn get(db: &DatabaseConnection) -> Result<Option<String>, DbErr> {
-        let message = format!("Getting cursor");
-        //sender.send(message).await.unwrap();
         let cursor = cursors::Entity::find_by_id(0).one(db).await?;
 
-        //drop(sender);
         if let Some(cursor) = cursor {
             return Ok(Some(cursor.cursor));
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn get_block_number(db: &DatabaseConnection) -> Result<Option<String>, DbErr> {
+        let cursor = cursors::Entity::find_by_id(0).one(db).await?;
+
+        if let Some(cursor) = cursor {
+            return Ok(Some(cursor.block_number));
         } else {
             Ok(None)
         }
@@ -520,10 +617,9 @@ pub mod cursor {
 pub mod accounts {
     use entity::accounts::*;
     use migration::{DbErr, OnConflict};
-    use sea_orm::{ActiveValue, DatabaseConnection, EntityTrait, InsertResult};
-    use tokio::sync::mpsc::Sender;
+    use sea_orm::{ActiveValue, ConnectionTrait, EntityTrait};
 
-    pub async fn create(db: &DatabaseConnection, address: String) -> Result<(), DbErr> {
+    pub async fn create(db: &impl ConnectionTrait, address: String) -> Result<(), DbErr> {
         let account = Entity::find_by_id(address.clone()).one(db).await?;
 
         if let None = account {
@@ -537,14 +633,7 @@ pub mod accounts {
                 .do_nothing()
                 .exec(db)
                 .await?;
-
-            let message = format!("Creating account {}", address);
-            //sender.send(message).await.unwrap();
-            //drop(sender);
         } else {
-            let message = format!("Account {} already existst", address);
-            //sender.send(message).await.unwrap();
-            //drop(sender);
         }
 
         Ok(())
@@ -556,19 +645,20 @@ pub mod triples {
     use entity::triples::*;
     use migration::{DbErr, OnConflict};
     use sea_orm::{
-        ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, InsertResult,
-        QueryFilter, Set,
+        ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection,
+        EntityTrait, QueryFilter, Set,
     };
-    use tokio::sync::mpsc::Sender;
+    use sea_query::RcOrArc;
     use uuid::Uuid;
 
     use crate::{
         constants::{Attributes, Entities, ROOT_SPACE_ADDRESS},
+        models::entities::{upsert_is_type, self},
         triples::{ActionTriple, ValueType},
     };
 
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         entity_id: String,
         attribute_id: String,
         value: ValueType,
@@ -580,22 +670,11 @@ pub mod triples {
 
         super::entities::create(db, attribute_id.clone(), space.clone()).await?;
 
-        //super::entities::create(db, value.id().to_string(), space.clone()).await?;
-
         let id = format!("{}", Uuid::new_v4());
 
         if let Some(_) = Entity::find_by_id(id.clone()).one(db).await? {
             return Ok(());
         } else {
-            let message = format!(
-                "Creating triple {} {} {}",
-                entity_id,
-                attribute_id,
-                value.id(),
-            );
-            //sender.send(message).await.unwrap();
-            //drop(sender);
-
             let mut triple = ActiveModel {
                 id: Set(id.clone()),
                 entity_id: Set(entity_id),
@@ -608,22 +687,22 @@ pub mod triples {
             };
 
             match value {
-                ValueType::Number { id, value } => {
+                ValueType::Number { id: _, value } => {
                     triple.number_value = ActiveValue::Set(Some(value.to_string()));
                 }
-                ValueType::String { id, value } => {
+                ValueType::String { id: _, value } => {
                     triple.string_value = ActiveValue::Set(Some(value));
                 }
-                ValueType::Image { id, value } => {
+                ValueType::Image { id: _, value } => {
                     triple.string_value = ActiveValue::Set(Some(value));
                 }
                 ValueType::Entity { id } => {
                     triple.entity_value = ActiveValue::Set(Some(id));
                 }
-                ValueType::Date { id, value } => {
+                ValueType::Date { id: _, value } => {
                     triple.string_value = ActiveValue::Set(Some(value));
                 }
-                ValueType::Url { id, value } => {
+                ValueType::Url { id: _, value } => {
                     triple.string_value = ActiveValue::Set(Some(value));
                 }
             }
@@ -639,7 +718,7 @@ pub mod triples {
     }
 
     pub async fn delete(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         entity_id: String,
         attribute_id: String,
         value: ValueType,
@@ -657,24 +736,8 @@ pub mod triples {
             let mut triple: ActiveModel = triple.into();
             triple.deleted = Set(true);
             triple.save(db).await?;
-            Ok(())
-        } else {
-            Ok(())
         }
-
-        // let triple = ActiveModel {
-        //     id: ActiveValue::Set(format!("{}-{}-{}", entity_id, attribute_id, value.id())),
-        //     entity_id: ActiveValue::Set(entity_id),
-        //     attribute_id: ActiveValue::Set(attribute_id),
-        //     value: ActiveValue::Set(value.value().to_string()),
-        //     value_id: ActiveValue::Set(value.id().to_string()),
-        //     value_type: ActiveValue::Set(value.value_type().to_string()),
-        //     defined_in: ActiveValue::Set(space),
-        // };
-
-        // Entity::delete(triple).exec(db).await?;
-
-        // Ok(())
+        Ok(())
     }
 
     pub async fn bootstrap(db: &DatabaseConnection) -> Result<(), Error> {
@@ -688,6 +751,20 @@ pub mod triples {
 
         let mut action_triples = Vec::new();
 
+        let space = ROOT_SPACE_ADDRESS.to_string();
+
+        for entity in Entities::iter() {
+            // make an entity for the attribute
+            let entity_id = entity.id();
+            entities::create(db, entity_id.into(), space.to_string()).await?;
+        }
+
+        for attribute in Attributes::iter() {
+            // make an entity for the attribute
+            let entity_id = attribute.id();
+            entities::create(db, entity_id.into(), space.to_string()).await?;
+        }
+
         for attribute in Attributes::iter() {
             // bootstrap the name of the attribute
             let entity_id = attribute.id();
@@ -696,7 +773,7 @@ pub mod triples {
                 id: entity_id.to_string(),
                 value: value.to_string(),
             };
-            let space = ROOT_SPACE_ADDRESS.to_string();
+
             let action = ActionTriple::CreateTriple {
                 entity_id: entity_id.into(),
                 attribute_id: name_attribute.into(),
@@ -745,6 +822,18 @@ pub mod triples {
                 value: value.to_string(),
             };
 
+            // make the entity a type
+            let action = ActionTriple::CreateTriple {
+                entity_id: entity_id.into(),
+                attribute_id: Attributes::Type.id().into(),
+                value: ValueType::Entity {
+                    id: Entities::SchemaType.id().to_string(),
+                },
+                space: space.clone(),
+                author: author.to_string(),
+            };
+            action_triples.push(action);
+
             let action = ActionTriple::CreateTriple {
                 entity_id: entity_id.into(),
                 attribute_id: name_attribute.into(),
@@ -783,21 +872,32 @@ pub mod triples {
             }
         }
 
-        let mut sink_actions = Vec::new();
+        let mut default = Vec::new();
+        let mut optional = Vec::new();
         for action_triple in action_triples {
             let (sink_action, option_action) = action_triple.get_sink_actions();
-            sink_actions.push(sink_action);
+            default.push(sink_action);
 
             if let Some(option_action) = option_action {
-                sink_actions.push(option_action);
+                optional.push(option_action);
             }
         }
 
-        sink_actions.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
-        println!("{:#?}", sink_actions);
+        default.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
+        optional.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
 
-        for action in sink_actions {
-            action.execute(db).await?;
+        for action in default {
+            let result = action.execute(db, true).await;
+            if let Err(err) = result {
+                panic!("ERROR: {:?}, on ACTION {:?}", err, action);
+            }
+        }
+
+        for action in optional {
+            let result = action.execute(db, true).await;
+            if let Err(err) = result {
+                panic!("ERROR: {:?}, on ACTION {:?}", err, action);
+            }
         }
 
         Ok(())
@@ -808,20 +908,17 @@ pub mod triples {
 pub mod actions {
     use entity::actions::*;
     use migration::{DbErr, OnConflict};
+    use sea_orm::ConnectionTrait;
     use sea_orm::EntityTrait;
     use sea_orm::Set;
-    use tokio::sync::mpsc::Sender;
 
     use crate::triples::{ActionTriple, ValueType};
 
     pub async fn create(
-        db: &sea_orm::DatabaseConnection,
+        db: &impl ConnectionTrait,
         action_triple: &ActionTriple,
     ) -> Result<(), DbErr> {
         let id = format!("{}", uuid::Uuid::new_v4());
-        let message = format!("Creating action {}", id);
-        //sender.send(message).await;
-        //drop(sender);
 
         let action_type = action_triple.action_type().to_string();
 

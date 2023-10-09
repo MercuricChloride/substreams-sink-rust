@@ -22,20 +22,19 @@
 
 use anyhow::Error;
 use base64::{engine::general_purpose, Engine as _};
-use futures03::{
-    future::{join_all, try_join_all},
-    stream::FuturesUnordered,
-};
+use futures03::{future::try_join_all, stream::FuturesUnordered};
 use migration::DbErr;
 use sea_orm::DatabaseConnection;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio_stream::StreamExt;
 
 use crate::{
-    constants::{Attributes, Entities},
-    models::{self, accounts, actions},
+    actions::{
+        entities::EntityAction, general::GeneralAction, spaces::SpaceAction, tables::TableAction,
+    },
+    constants::Attributes,
+    models::{accounts, actions},
     pb::schema::EntryAdded,
     sink_actions::SinkAction,
 };
@@ -62,7 +61,12 @@ pub struct Action {
 
 impl Action {
     /// This function adds all of the action triples in this action to the database.
-    pub async fn execute_action_triples(&self, db: &DatabaseConnection) -> Result<(), DbErr> {
+    pub async fn execute_action_triples(
+        &self,
+        db: &DatabaseConnection,
+        space_queries: bool,
+        max_connections: usize,
+    ) -> Result<(), DbErr> {
         // we want to chunk these into groups based on the size of the constant MAX_CONNECTIONS
         // and then execute them in parallel
         let mut futures = FuturesUnordered::new();
@@ -70,15 +74,13 @@ impl Action {
         let mut chunk = Vec::new();
         for action_triple in self.actions.iter() {
             if action_triple.is_missing_data() {
-                println!(
-                    "Missing data in action triple: {:?} in action: {:?}",
-                    action_triple, self
-                );
+                println!("Missing data in action triple: {:?}", action_triple);
                 continue;
             }
 
-            chunk.push(action_triple.execute(db));
-            if chunk.len() == crate::MAX_CONNECTIONS {
+            chunk.push(action_triple.execute(db, space_queries));
+
+            if chunk.len() == max_connections {
                 futures.push(try_join_all(chunk));
                 chunk = Vec::new();
             }
@@ -231,8 +233,9 @@ impl Action {
 /// In geo we have a concept of actions, which represent changes to make in the graph.
 /// This enum represents the different types of actions that can be taken.
 #[derive(Serialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ActionTriple {
+    #[serde(rename_all = "camelCase")]
     CreateEntity {
         entity_id: String,
         #[serde(skip)]
@@ -240,6 +243,7 @@ pub enum ActionTriple {
         #[serde(skip)]
         author: String,
     },
+    #[serde(rename_all = "camelCase")]
     CreateTriple {
         entity_id: String,
         attribute_id: String,
@@ -249,6 +253,7 @@ pub enum ActionTriple {
         #[serde(skip)]
         author: String,
     },
+    #[serde(rename_all = "camelCase")]
     DeleteTriple {
         entity_id: String,
         attribute_id: String,
@@ -357,7 +362,7 @@ impl ActionTriple {
     }
 
     /// This method includes the action_triple in the database
-    pub async fn execute(&self, db: &DatabaseConnection) -> Result<(), DbErr> {
+    pub async fn execute(&self, db: &DatabaseConnection, space_queries: bool) -> Result<(), DbErr> {
         actions::create(db, self).await?;
         Ok(())
     }
@@ -410,37 +415,37 @@ impl ActionTriple {
                 entity_id,
                 space,
                 author,
-            } => SinkAction::EntityCreated {
+            } => SinkAction::General(GeneralAction::EntityCreated {
                 space: space.to_string(),
                 entity_id: entity_id.to_string(),
                 author: author.to_string(),
-            },
+            }),
             ActionTriple::CreateTriple {
                 entity_id,
                 attribute_id,
                 value,
                 space,
                 author,
-            } => SinkAction::TripleAdded {
+            } => SinkAction::General(GeneralAction::TripleAdded {
                 space: space.to_string(),
                 entity_id: entity_id.clone(),
                 attribute_id: attribute_id.clone(),
                 value: value.clone(),
                 author: author.clone(),
-            },
+            }),
             ActionTriple::DeleteTriple {
                 entity_id,
                 attribute_id,
                 value,
                 space,
                 author,
-            } => SinkAction::TripleDeleted {
+            } => SinkAction::General(GeneralAction::TripleDeleted {
                 space: space.clone(),
                 entity_id: entity_id.clone(),
                 attribute_id: attribute_id.clone(),
                 value: value.clone(),
                 author: author.clone(),
-            },
+            }),
         }
     }
 
@@ -452,11 +457,13 @@ impl ActionTriple {
                 space,
                 value,
                 ..
-            } if attribute_id.starts_with(Attributes::Type.id()) => Some(SinkAction::TypeAdded {
-                space: space.to_string(),
-                entity_id: entity_id.to_string(),
-                type_id: value.id().to_string(),
-            }),
+            } if attribute_id.starts_with(Attributes::Type.id()) => {
+                Some(SinkAction::Table(TableAction::TypeAdded {
+                    space: space.to_string(),
+                    entity_id: entity_id.to_string(),
+                    type_id: value.id().to_string(),
+                }))
+            }
             _ => None,
         }
     }
@@ -472,11 +479,11 @@ impl ActionTriple {
             } if attribute_id.starts_with(Attributes::Space.id()) => {
                 // if the attribute id is space, and the value is a string, then we have created a space.
                 if let ValueType::String { id: _, value } = value {
-                    Some(SinkAction::SpaceCreated {
+                    Some(SinkAction::Table(TableAction::SpaceCreated {
                         entity_id: entity_id.to_string(),
                         space: value.clone(),
                         created_in_space: space.clone(),
-                    })
+                    }))
                 } else {
                     None
                 }
@@ -496,12 +503,12 @@ impl ActionTriple {
             } if attribute_id.starts_with(Attributes::Attribute.id()) => {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::Entity { id } = value {
-                    return Some(SinkAction::AttributeAdded {
+                    return Some(SinkAction::Table(TableAction::AttributeAdded {
                         space: space.clone(),
                         entity_id: entity_id.clone(),
                         attribute_id: id.clone(),
                         value: value.clone(),
-                    });
+                    }));
                 } else {
                     None
                 }
@@ -521,11 +528,11 @@ impl ActionTriple {
             } if attribute_id.starts_with(Attributes::Name.id()) => {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::String { value, .. } = value {
-                    return Some(SinkAction::NameAdded {
+                    return Some(SinkAction::Entity(EntityAction::NameAdded {
                         space: space.clone(),
                         entity_id: entity_id.clone(),
                         name: value.clone(),
-                    });
+                    }));
                 } else {
                     None
                 }
@@ -545,11 +552,11 @@ impl ActionTriple {
             } if attribute_id.starts_with(Attributes::Description.id()) => {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::String { value, .. } = value {
-                    return Some(SinkAction::DescriptionAdded {
+                    return Some(SinkAction::Entity(EntityAction::DescriptionAdded {
                         space: space.clone(),
                         entity_id: entity_id.clone(),
                         description: value.clone(),
-                    });
+                    }));
                 } else {
                     None
                 }
@@ -568,11 +575,11 @@ impl ActionTriple {
                 ..
             } if attribute_id.starts_with(Attributes::Cover.id()) => {
                 if let ValueType::String { value, .. } = value {
-                    return Some(SinkAction::CoverAdded {
+                    return Some(SinkAction::Space(SpaceAction::CoverAdded {
                         space: space.clone(),
                         entity_id: entity_id.clone(),
                         cover_image: value.clone(),
-                    });
+                    }));
                 } else {
                     None
                 }
@@ -591,11 +598,11 @@ impl ActionTriple {
                 ..
             } if attribute_id.starts_with(Attributes::Avatar.id()) => {
                 if let ValueType::String { value, .. } = value {
-                    return Some(SinkAction::AvatarAdded {
+                    return Some(SinkAction::Entity(EntityAction::AvatarAdded {
                         space: space.clone(),
                         entity_id: entity_id.clone(),
                         avatar_image: value.clone(),
-                    });
+                    }));
                 } else {
                     None
                 }
@@ -614,12 +621,12 @@ impl ActionTriple {
                 ..
             } if attribute_id.starts_with(Attributes::ValueType.id()) => {
                 if let ValueType::Entity { id } = value {
-                    Some(SinkAction::ValueTypeAdded {
+                    Some(SinkAction::Table(TableAction::ValueTypeAdded {
                         space: space.clone(),
                         entity_id: entity_id.clone(),
                         attribute_id: attribute_id.clone(),
                         value_type: id.to_string(),
-                    })
+                    }))
                 } else {
                     None
                 }
@@ -641,10 +648,10 @@ impl ActionTriple {
                     _ => return None,
                 };
 
-                Some(SinkAction::SubspaceAdded {
+                Some(SinkAction::Space(SpaceAction::SubspaceAdded {
                     parent_space: entity_id.clone(),
                     child_space: child_space_id.clone(),
-                })
+                }))
             }
             _ => None,
         }
@@ -663,10 +670,10 @@ impl ActionTriple {
                     _ => return None,
                 };
 
-                Some(SinkAction::SubspaceRemoved {
+                Some(SinkAction::Space(SpaceAction::SubspaceRemoved {
                     parent_space: entity_id.clone(),
                     child_space: child_space_id.clone(),
-                })
+                }))
             }
             _ => None,
         }
@@ -674,8 +681,7 @@ impl ActionTriple {
 }
 
 /// This represents the value type of a triple. IE The final part of a triple. (Entity, Attribute, _Value_)
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub enum ValueType {
     /// The number value
     Number {
@@ -803,6 +809,36 @@ impl<'de> Deserialize<'de> for ValueType {
             }),
             _ => Err(serde::de::Error::custom("Unknown type")),
         }
+    }
+}
+
+impl Serialize for ValueType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let (variant_name, id, value): (&str, String, String) = match self {
+            ValueType::String { id, value } => ("string", id.to_string(), value.to_string()),
+            ValueType::Image { id, value } => ("image", id.to_string(), value.to_string()),
+            ValueType::Entity { id } => ("entity", id.to_string(), "".to_string()),
+            ValueType::Date { id, value } => ("date", id.to_string(), value.to_string()),
+            ValueType::Url { id, value } => ("url", id.to_string(), value.to_string()),
+            ValueType::Number { id, value } => {
+                let number = value.to_string();
+                ("number", id.to_string(), number)
+            }
+        };
+
+        let mut state = serializer.serialize_struct("ValueType", 3)?;
+        state.serialize_field("type", variant_name)?;
+        state.serialize_field("id", &id)?;
+        match self {
+            ValueType::Entity { .. } => {}
+            _ => {
+                state.serialize_field("value", &value)?;
+            }
+        }
+        state.end()
     }
 }
 

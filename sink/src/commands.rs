@@ -9,24 +9,19 @@ pub struct Args {
     /// Substreams endpoint
     #[arg(long, env = "SUBSTREAMS_ENDPOINT")]
     pub substreams_endpoint: String,
-
     /// Path or link to spkg
     #[arg(short, long, default_value = "substream.spkg")]
     pub spkg: String,
-
     /// Module name
     #[arg(short, long, default_value = "map_entries_added")]
     pub module: String,
-
     #[arg(short, long, env = "DATABASE_URL")]
     pub database_url: String,
+    #[arg(long, env = "MAX_CONNECTIONS", default_value = "99")]
+    pub max_connections: u32,
     /// Substreams API token, if not provided, SUBSTREAMS_API_TOKEN environment variable will be used
     #[arg(short, long, env = "SUBSTREAMS_API_TOKEN")]
     pub token: String,
-
-    /// Whether or not to use the GUI
-    #[arg(short, long)]
-    pub gui: bool,
 }
 
 #[derive(Subcommand, Debug)]

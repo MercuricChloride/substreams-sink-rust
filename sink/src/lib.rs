@@ -1,56 +1,37 @@
-use anyhow::{format_err, Context, Error};
-use clap::Parser;
-use dotenv::dotenv;
-use futures03::{future::join_all, StreamExt};
-use futures03::{Future, TryStreamExt};
-use gui::{controls_handle, ui, GuiData, StatefulList};
-use migration::DbErr;
-use models::triples::bootstrap;
-use pb::schema::EntryAdded;
-use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
-use pb::sf::substreams::v1::Package;
-
-use entity::*;
-use sea_orm::{ActiveValue, ConnectOptions, DatabaseTransaction, TransactionTrait};
-
-use prost::Message;
-use sea_orm::{Database, DatabaseConnection, EntityTrait};
-use sea_query::OnConflict;
-use sink_actions::SinkAction;
-use tokio::sync::mpsc::{self, channel, unbounded_channel, Receiver, Sender, UnboundedSender};
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
-use tokio::time::Instant;
-use tokio::{join, spawn, try_join};
-use tui::tui_handle;
-
-use std::io::{Read, Stdout};
-use std::pin::Pin;
-use std::time::{Duration, SystemTime};
-use std::{process::exit, sync::Arc};
-use substreams::SubstreamsEndpoint;
-use substreams_stream::{BlockResponse, SubstreamsStream};
-
-use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-
-use ratatui::{backend::CrosstermBackend, Terminal};
-use std::{io, thread};
-
 use crate::pb::schema::EntriesAdded;
 use crate::sink_actions::handle_sink_actions;
 use crate::triples::Action;
-
+use anyhow::{format_err, Context, Error};
+use clap::Parser;
 use commands::Args;
+use dotenv::dotenv;
+use futures03::{
+    future::{join_all, try_join_all},
+    stream::FuturesOrdered,
+    StreamExt,
+};
+use migration::DbErr;
+use models::{cursor, triples::bootstrap};
+use pb::sf::substreams::{
+    rpc::v2::{BlockScopedData, BlockUndoSignal},
+    v1::Package,
+};
+use prost::Message;
+use sea_orm::{ConnectOptions, ConnectionTrait, DatabaseTransaction, TransactionTrait};
+use sea_orm::{Database, DatabaseConnection};
+use sink_actions::SinkAction;
+use std::{sync::Arc, time::Duration};
+use substreams::SubstreamsEndpoint;
+use substreams_stream::{BlockResponse, SubstreamsStream};
+use tokio::{
+    sync::mpsc::{channel, Sender},
+    time::Instant,
+    try_join,
+};
 
-use models::cursor;
-
+pub mod actions;
 pub mod commands;
 pub mod constants;
-pub mod gui;
 pub mod models;
 pub mod pb;
 pub mod persist;
@@ -59,12 +40,6 @@ pub mod sink_actions;
 pub mod substreams;
 pub mod substreams_stream;
 pub mod triples;
-pub mod tui;
-
-// The max connections in postgres, by default, is 100. I keep 1 connection open for db viewing.
-// increase this to parallelize the db interactions
-// @GOOSE MAKE THIS CONFIGURABLE BY ENV USING LAZY STATIC
-pub const MAX_CONNECTIONS: usize = 99;
 
 pub async fn main() -> Result<(), Error> {
     // load the .env file
@@ -77,26 +52,26 @@ pub async fn main() -> Result<(), Error> {
         module: module_name,
         token,
         database_url,
-        gui,
+        max_connections,
     } = Args::parse();
 
-    //let start_block = 36472425;
-    let start_block = 36800000;
+    let start_block = 36472425;
     let stop_block = 47942548;
 
+    // Load the pacakge and endpoint
     let package = read_package(&package_file).await?;
     let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, Some(token)).await?);
 
-    // the reason for the long timeout is because any interactions with the db will be blocking if the db can't
-    // handle any more connections at once.
+    // configure the database connections
     let mut connection_options = ConnectOptions::new(database_url);
-    connection_options.max_connections(MAX_CONNECTIONS as u32);
+    connection_options.max_connections(max_connections);
     connection_options.connect_timeout(Duration::from_secs(60));
     connection_options.idle_timeout(Duration::from_secs(60));
 
     let db: Arc<DatabaseConnection> = Arc::new(Database::connect(connection_options).await?);
 
     // bootstrap the database
+    #[cfg(not(feature = "no_db_sync"))]
     bootstrap(&db).await?;
 
     let cursor: Option<String> = cursor::get(&db).await?;
@@ -106,107 +81,91 @@ pub async fn main() -> Result<(), Error> {
         cursor,
         package.modules.clone(),
         module_name.to_string(),
-        // Start/stop block are not handled within this project, feel free to play with it
         start_block as i64,
         stop_block,
     );
 
-    if !gui {
-        // spawn a concurrent process to handle the substream data
-        let (tx, mut rx) = channel::<Action>(10000);
+    // spawn a concurrent process to handle the substream data
+    let (tx, mut rx) = channel::<Action>(10000);
 
-        let receiver_task = async {
-            let mut start;
-            while let Some(action) = rx.recv().await {
-                let db = db.clone();
-                start = Instant::now();
-                println!("Processing entry");
-
-                let result = match &command {
-                    commands::Commands::Deploy { spaces } => {
-                        handle_action(action, db.clone()).await
-                    }
-                    commands::Commands::DeployGlobal { root_space_address } => {
-                        handle_global_action(action, db.clone()).await
-                    }
-                };
-
-                if let Err(err) = result {
-                    println!("Error processing entry: {:?}", err);
-                    return Err(Error::from(err));
-                }
-
-                println!("Entry processed in {:?}", start.elapsed());
+    #[cfg(not(feature = "no_db_sync"))]
+    let receiver_task = async {
+        let (spaces, use_space_queries) = match command {
+            commands::Commands::Deploy { spaces } => (spaces, true),
+            commands::Commands::DeployGlobal { root_space_address } => {
+                (vec![root_space_address], false)
             }
-            Ok(())
         };
 
-        let stream_task = async {
-            let tx = tx;
-            loop {
-                match stream.next().await {
-                    None => {
-                        println!("Stream consumed");
-                        break;
-                    }
-                    Some(Ok(BlockResponse::New(data))) => {
-                        if let Some(output) = &data.output {
-                            if let Some(map_output) = &output.map_output {
-                                let block_number = data.clock.as_ref().unwrap().number;
-                                let value = EntriesAdded::decode(map_output.value.as_slice())?;
-                                // if the block is empty, store the cursor and set the flag to false
-                                if value.entries.len() == 0 {
-                                    cursor::store(&db, data.cursor.clone(), block_number).await?;
-                                } else {
-                                    println!(
-                                        "Processing block {}, {} entries to process.",
-                                        block_number,
-                                        value.entries.len()
-                                    );
-                                    process_block_scoped_data(value, data, db.clone(), &tx).await?;
-                                }
+        let mut start;
+        while let Some(action) = rx.recv().await {
+            let db = db.clone();
+            start = Instant::now();
+            println!("Processing entry");
+
+            handle_action(
+                action,
+                db.clone(),
+                use_space_queries,
+                max_connections as usize,
+            )
+            .await?;
+
+            println!("Entry processed in {:?}", start.elapsed());
+        }
+        Ok(())
+    };
+
+    let stream_task = async {
+        let tx = tx;
+        loop {
+            match stream.next().await {
+                None => {
+                    println!("Stream consumed");
+                    break;
+                }
+                Some(Ok(BlockResponse::New(data))) => {
+                    if let Some(output) = &data.output {
+                        if let Some(map_output) = &output.map_output {
+                            let block_number = data.clock.as_ref().unwrap().number;
+                            println!("Processing block {}", block_number);
+                            let value = EntriesAdded::decode(map_output.value.as_slice())?;
+                            // if the block is empty, store the cursor and set the flag to false
+                            if value.entries.len() == 0 {
+                                cursor::store(&db, data.cursor.clone(), block_number).await?;
+                            } else {
+                                println!(
+                                    "Processing block {}, {} entries to process.",
+                                    block_number,
+                                    value.entries.len()
+                                );
+                                process_block_scoped_data(value, data, db.clone(), &tx).await?;
                             }
                         }
                     }
-                    Some(Ok(BlockResponse::Undo(undo_signal))) => {
-                        process_block_undo_signal(&undo_signal).unwrap();
-                    }
-                    Some(Err(err)) => {
-                        println!("Stream terminated with error");
-                        println!("{:?}", err);
-                        return Err(Error::msg(err));
-                    }
+                }
+                Some(Ok(BlockResponse::Undo(undo_signal))) => {
+                    process_block_undo_signal(&undo_signal).unwrap();
+                }
+                Some(Err(err)) => {
+                    println!("Stream terminated with error");
+                    println!("{:?}", err);
+                    return Err(Error::msg(err));
                 }
             }
-            Ok(())
-        };
-
-        let res = try_join!(stream_task, receiver_task);
-
-        match res {
-            Ok(_) => Ok(()),
-            Err(err) => Err(err.into()),
         }
-    } else {
-        todo!("need to fix gui");
-        // TODO Add the message handler back if it is appropriate
-        // spawn a task to handle messages
-        // let gui_data_lock_clone = gui_data_lock.clone();
-        // let message_task = tokio::spawn(async move {
-        //     while let Some(response) = message_receiver.recv().await {
-        //         if !gui {
-        //             //if response.starts_with("CREATE") {
-        //             //println!("{}", response);
-        //             //}
-        //             println!("{}", response);
-        //         } else {
-        //             let mut gui_data = gui_data_lock_clone.write().await;
-        //             gui_data.tasks.push(response);
-        //             gui_data.task_count += 1;
-        //             drop(gui_data);
-        //         }
-        //     }
-        // });
+        Ok(())
+    };
+
+    #[cfg(not(feature = "no_db_sync"))]
+    let res = try_join!(stream_task, receiver_task);
+
+    #[cfg(feature = "no_db_sync")]
+    let res = stream_task.await;
+
+    match res {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -220,17 +179,37 @@ async fn process_block_scoped_data(
     let block_number = data.clock.as_ref().unwrap().number;
 
     println!("Getting actions for block {}", block_number);
-    let actions = join_all(entries.iter().map(Action::decode_from_entry)).await;
+    let actions = join_all(entries.iter().map(|entry| async move {
+        (
+            Action::decode_from_entry(entry).await,
+            entry.author.clone(),
+            entry.space.clone(),
+        )
+    }))
+    .await;
     println!("Actions retrieved");
-    for action in actions.into_iter() {
+
+    for (i, (action, author, space)) in actions.into_iter().enumerate() {
         match action {
-            Ok(action) => sender.send(action).await?,
+            Ok(action) => {
+                #[cfg(feature = "no_db_sync")]
+                {
+                    let file_path =
+                        format!("./action_cache/{block_number}_{i}_{space}_{author}.json");
+                    std::fs::write(&file_path, serde_json::to_string(&action).unwrap()).unwrap();
+                    println!("Wrote action to file");
+                }
+
+                #[cfg(not(feature = "no_db_sync"))]
+                sender.send(action).await?
+            }
             Err(err) => {
                 println!("Error getting action: {:?}", err);
                 continue;
             }
         }
     }
+
     println!("Actions sent");
 
     cursor::store(&db, data.cursor, block_number).await?;
@@ -240,41 +219,104 @@ async fn process_block_scoped_data(
 
 // This function should only use a single connection to the database
 // We might want to make this function more concurrent, but we will see.
-async fn handle_action(action: Action, db: Arc<DatabaseConnection>) -> Result<(), DbErr> {
-    action.execute_action_triples(&db).await?;
+async fn handle_action(
+    action: Action,
+    db: Arc<DatabaseConnection>,
+    use_space_queries: bool,
+    max_connections: usize,
+) -> Result<(), Error> {
+    action
+        .execute_action_triples(&db, use_space_queries, max_connections)
+        .await?;
     println!("Action triples added to db");
 
     action.add_author_to_db(&db).await?;
     println!("Author added to db");
 
-    let sink_actions = action.get_sink_actions();
-    handle_sink_actions(sink_actions, &db).await?;
-    println!("Sink actions handled");
+    let sink_actions = if use_space_queries {
+        action.get_sink_actions()
+    } else {
+        action.get_global_sink_actions()
+    };
+
+    let mut default_actions = Vec::new();
+    let mut optional_actions = Vec::new();
+
+    for (default, optional) in sink_actions.into_iter() {
+        default_actions.push(default);
+        if let Some(optional) = optional {
+            optional_actions.push(optional);
+        }
+    }
+
+    optional_actions.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
+
+    let max_failures = 4;
+
+    let txn = db.begin().await?;
+    try_execute(
+        &default_actions,
+        txn,
+        use_space_queries,
+        max_connections,
+        max_failures,
+    )
+    .await?;
+    println!("Default actions handled");
+
+    let txn = db.begin().await?;
+    try_execute(
+        &optional_actions,
+        txn,
+        use_space_queries,
+        max_connections,
+        max_failures,
+    )
+    .await?;
+    println!("Optional actions handled");
 
     Ok(())
 }
 
-/// This function is very similar to `handle_action`, however it is used to only perform the actions
-/// for running the global, stripped down version of the sink.
-/// So it operates on different sink actions etc.
-async fn handle_global_action(action: Action, db: Arc<DatabaseConnection>) -> Result<(), DbErr> {
-    //action.execute_action_triples(&db).await?;
-    //println!("Action triples added to db");
+async fn try_execute(
+    sink_actions: &Vec<SinkAction>,
+    txn: DatabaseTransaction,
+    use_space_queries: bool,
+    max_connections: usize,
+    max_failures: i32,
+) -> Result<(), Error> {
+    let mut failed_count = 0;
+    while failed_count < max_failures {
+        let result =
+            handle_sink_actions(sink_actions, &txn, use_space_queries, max_connections).await;
 
-    action.add_author_to_db(&db).await?;
-    println!("Author added to db");
+        if let Err(err) = result {
+            println!("Error handling sink actions: {:?}, retrying", err);
+            failed_count += 1;
+            // sleep a random duration between 1 and 5 seconds
+            let sleep_duration = rand::random::<u64>() % 5 + 1;
+            tokio::time::sleep(Duration::from_secs(sleep_duration)).await;
+            continue;
+        } else {
+            break;
+        }
+    }
 
-    let sink_actions = action.get_global_sink_actions();
-    handle_sink_actions(sink_actions, &db).await?;
-    println!("Sink actions handled");
-
-    Ok(())
+    if failed_count == max_failures {
+        txn.rollback().await.unwrap();
+        Err(format_err!("Too many failures"))
+    } else {
+        txn.commit().await.unwrap();
+        println!("Deafult actions handled");
+        Ok(())
+    }
 }
 
 fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {
     // `BlockUndoSignal` must be treated as "delete every data that has been recorded after
     // block height specified by block in BlockUndoSignal". In the example above, this means
     // you must delete changes done by `Block #7b` and `Block #6b`. The exact details depends
+
     // on your own logic. If for example all your added record contain a block number, a
     // simple way is to do `delete all records where block_num > 5` which is the block num
     // received in the `BlockUndoSignal` (this is true for append only records, so when only `INSERT` are allowed).
@@ -295,4 +337,232 @@ async fn read_http_package(input: &str) -> Result<Package, anyhow::Error> {
     let body = reqwest::get(input).await?.bytes().await?;
 
     Package::decode(body).context("decode command")
+}
+
+fn flatten_actions(actions: Vec<(SinkAction, Option<SinkAction>)>) -> Vec<SinkAction> {
+    let mut actions: Vec<SinkAction> = actions
+        .into_iter()
+        .flat_map(|(action, maybe_action)| {
+            if let Some(maybe_action) = maybe_action {
+                vec![action, maybe_action]
+            } else {
+                vec![action]
+            }
+        })
+        .collect();
+
+    actions.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
+
+    actions
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use entity::cursors;
+
+    use crate::triples::ActionTriple;
+
+    use super::*;
+
+    // the cid we are testing for
+    const IPFS_CID: &str = "QmZoQVLafegfRqkmM7Px5FuTbEArBhGec3TVRA5b5VQrun";
+
+    fn update_space_and_author(triple: &mut ActionTriple, new_space: String, new_author: String) {
+        match triple {
+            ActionTriple::CreateEntity { space, author, .. } => {
+                *space = new_space;
+                *author = new_author;
+            }
+            ActionTriple::CreateTriple { space, author, .. } => {
+                *space = new_space;
+                *author = new_author;
+            }
+
+            ActionTriple::DeleteTriple { space, author, .. } => {
+                *space = new_space;
+                *author = new_author;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_entry() {
+        dotenv().ok();
+
+        let max_connections = 200;
+        let database_url = std::env::var("DATABASE_URL").unwrap();
+
+        let mut connection_options = ConnectOptions::new(database_url);
+        connection_options.max_connections(max_connections);
+        connection_options.connect_timeout(Duration::from_secs(60));
+        connection_options.idle_timeout(Duration::from_secs(60));
+
+        let db: Arc<DatabaseConnection> =
+            Arc::new(Database::connect(connection_options).await.unwrap());
+
+        let space = "0xe3d08763498e3247ec00a481f199b018f2148723";
+        let author = "0x66703c058795b9cb215fbcc7c6b07aee7d216f24";
+
+        // we should always have the ipfs data cached locally, so we can just read the data from a file
+        let file = std::fs::read_to_string(format!("../ipfs-data/{}.json", IPFS_CID)).unwrap();
+
+        let mut action: Action = serde_json::from_slice(file.as_bytes()).unwrap();
+        for triple in action.actions.iter_mut() {
+            update_space_and_author(triple, space.to_string(), author.to_string());
+        }
+
+        let sink_actions = action.get_sink_actions();
+
+        let txn = db.begin().await.unwrap();
+        //handle_sink_actions(sink_actions, &txn, true, max_connections as usize)
+        //.await
+        //.unwrap();
+        txn.commit().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_all_entries() {
+        // this test will:
+        // 1. Start counting up from the start_block
+        // 2. For each block, get the cached_actions from the action_cache/ directory
+        // 3. For those actions, sort them by their index, and then execute them in order
+        // 4. Repeat until we reach the stop_block
+        let blocks_with_data_file = std::fs::read_to_string("./blocks_with_data.json").ok();
+        let mut blocks_with_data = if let Some(file) = &blocks_with_data_file {
+            serde_json::from_str::<HashMap<u64, bool>>(file).unwrap()
+        } else {
+            HashMap::new()
+        };
+
+        let mut block_data_vector = match blocks_with_data_file {
+            Some(_) => Some(blocks_with_data.keys().cloned().collect::<Vec<_>>()),
+            None => None,
+        };
+        if let Some(block_data_vector) = &mut block_data_vector {
+            block_data_vector.sort();
+            block_data_vector.reverse();
+        }
+
+        dotenv().ok();
+
+        let max_connections = 199;
+        let database_url = std::env::var("DATABASE_URL").unwrap();
+
+        let mut connection_options = ConnectOptions::new(database_url);
+        connection_options.max_connections(max_connections);
+        connection_options.connect_timeout(Duration::from_secs(60));
+        connection_options.idle_timeout(Duration::from_secs(60));
+
+        let db: Arc<DatabaseConnection> =
+            Arc::new(Database::connect(connection_options).await.unwrap());
+
+        let mut start_block = if let Some(block_data_vector) = &mut block_data_vector {
+            block_data_vector.pop().unwrap()
+            //39251292
+        } else {
+            36472425
+            //39251292
+        };
+
+        let stop_block: u64 = cursor::get_block_number(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let entries = std::fs::read_dir("../action_cache").unwrap();
+        let entries: Vec<_> = entries.filter_map(Result::ok).collect();
+
+        bootstrap(&db).await.unwrap();
+
+        while start_block < stop_block {
+            if let Some(block_data_vector) = &mut block_data_vector {
+                if !blocks_with_data.get(&start_block).is_some() {
+                    if let Some(block) = block_data_vector.pop() {
+                        start_block = block;
+                        continue;
+                    }
+                }
+            }
+            let prefix = format!("{}_", start_block);
+            // Filter out the files that start with the desired prefix.
+            let mut matching_files: Vec<_> = entries
+                .iter()
+                .filter(|entry| {
+                    if let Some(filename) = entry.path().file_name() {
+                        if let Some(filename_str) = filename.to_str() {
+                            return filename_str.starts_with(&prefix);
+                        }
+                    }
+                    false
+                })
+                .map(|entry| entry.path())
+                .collect();
+
+            if matching_files.len() > 0 {
+                blocks_with_data.insert(start_block, true);
+            }
+
+            println!(
+                "Found {} matching files for block {}",
+                matching_files.len(),
+                start_block
+            );
+
+            // we need to sort the matching files by their index (the number after the prefix)
+            // all of the files are of the form: {block_number}_{index}_{space}_{author}.json
+            matching_files.sort_by(|a, b| {
+                let a = a.file_name().unwrap().to_str().unwrap();
+                let b = b.file_name().unwrap().to_str().unwrap();
+
+                let a = a.split("_").collect::<Vec<_>>();
+                let b = b.split("_").collect::<Vec<_>>();
+
+                a[1].parse::<usize>()
+                    .unwrap()
+                    .cmp(&b[1].parse::<usize>().unwrap())
+            });
+
+            let mut actions: Vec<Action> = matching_files
+                .into_iter()
+                .map(|path| {
+                    let split_path = path.to_str().unwrap().split("_").collect::<Vec<_>>();
+                    let space = split_path[3].to_string();
+                    let author = split_path[4].trim_end_matches(".json").to_string();
+
+                    let action = &std::fs::read_to_string(&path).unwrap();
+                    let mut action = serde_json::from_slice::<Action>(action.as_bytes())
+                        .unwrap_or_else(|err| {
+                            panic!(
+                                "Error deserializing action: {:?}, {}",
+                                err,
+                                path.to_str().unwrap()
+                            )
+                        });
+                    action.space = space.clone();
+                    action.author = author.clone();
+
+                    action.actions.iter_mut().for_each(|triple| {
+                        update_space_and_author(triple, space.clone(), author.clone());
+                    });
+                    action
+                })
+                .collect();
+
+            for action in actions.into_iter() {
+                handle_action(action, db.clone(), true, max_connections as usize)
+                    .await
+                    .unwrap();
+                start_block += 1;
+            }
+        }
+
+        std::fs::write(
+            "./blocks_with_data.json",
+            serde_json::to_string(&blocks_with_data).unwrap(),
+        )
+        .unwrap();
+    }
 }
