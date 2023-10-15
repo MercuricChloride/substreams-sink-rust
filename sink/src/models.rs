@@ -714,12 +714,12 @@ pub mod accounts {
     use migration::{DbErr, OnConflict};
     use sea_orm::{ActiveValue, ConnectionTrait, DatabaseTransaction, EntityTrait};
 
-    pub async fn create(db: &DatabaseTransaction, address: String) -> Result<(), DbErr> {
+    pub async fn create(db: &DatabaseTransaction, address: &str) -> Result<(), DbErr> {
         let account = Entity::find_by_id(address.clone()).one(db).await?;
 
         if let None = account {
             let account = ActiveModel {
-                id: ActiveValue::Set(address.clone()),
+                id: ActiveValue::Set(address.to_string()),
                 ..Default::default()
             };
 

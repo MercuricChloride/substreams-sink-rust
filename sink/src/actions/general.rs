@@ -99,8 +99,8 @@ impl<'a> ActionDependencies<'a> for GeneralAction<'a> {
                 }),
                 SinkAction::Table(TableAction::TypeAdded {
                     space: "".into(),
-                    type_id: Entities::Attribute.id().into(),
                     entity_id: attribute_id,
+                    type_id: Entities::Attribute.id().into(),
                 }),
             ]),
             GeneralAction::TripleDeleted {
@@ -109,23 +109,24 @@ impl<'a> ActionDependencies<'a> for GeneralAction<'a> {
                 attribute_id,
                 value,
                 author,
-            } => Some(vec![
-                SinkAction::General(GeneralAction::EntityCreated {
-                    space: "".into(),
-                    author: "".into(),
-                    entity_id,
-                }),
-                SinkAction::General(GeneralAction::EntityCreated {
-                    space: "".into(),
-                    entity_id: attribute_id,
-                    author: "".into(),
-                }),
-                SinkAction::Table(TableAction::TypeAdded {
-                    space: "".into(),
-                    entity_id: attribute_id,
-                    type_id: Entities::Attribute.id().into(),
-                }),
-            ]),
+            } => None,
+// Some(vec![
+//                 SinkAction::General(GeneralAction::EntityCreated {
+//                     space: "".into(),
+//                     author: "".into(),
+//                     entity_id,
+//                 }),
+//                 SinkAction::General(GeneralAction::EntityCreated {
+//                     space: "".into(),
+//                     entity_id: attribute_id,
+//                     author: "".into(),
+//                 }),
+//                 SinkAction::Table(TableAction::TypeAdded {
+//                     space: "".into(),
+//                     entity_id: attribute_id,
+//                     type_id: Entities::Attribute.id().into(),
+//                 }),
+//             ]),
             GeneralAction::EntityCreated {
                 space,
                 entity_id,

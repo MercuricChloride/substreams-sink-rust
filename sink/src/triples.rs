@@ -24,7 +24,7 @@ use anyhow::Error;
 use base64::{engine::general_purpose, Engine as _};
 use futures03::{future::try_join_all, stream::FuturesUnordered};
 use migration::DbErr;
-use sea_orm::{DatabaseConnection, TransactionTrait};
+use sea_orm::{DatabaseConnection, DatabaseTransaction, TransactionTrait};
 use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use tokio_stream::StreamExt;
@@ -63,10 +63,10 @@ impl Action {
     /// This function adds all of the action triples in this action to the database.
     pub async fn execute_action_triples(
         &self,
-        db: &DatabaseConnection,
+        db: &DatabaseTransaction,
         space_queries: bool,
         max_connections: usize,
-    ) -> Result<(), DbErr> {
+    ) -> Result<(), Error> {
         // we want to chunk these into groups based on the size of the constant MAX_CONNECTIONS
         // and then execute them in parallel
         let mut futures = FuturesUnordered::new();
@@ -97,15 +97,13 @@ impl Action {
         Ok(())
     }
 
-    pub async fn add_author_to_db(&self, db: &DatabaseConnection) -> Result<(), DbErr> {
+    pub async fn add_author_to_db(&self, db: &DatabaseTransaction) -> Result<(), Error> {
         if self.author.is_empty() {
             println!("Author is empty");
             return Ok(());
         }
-        let author_address = self.author.clone();
-        let txn = db.begin().await?;
-        accounts::create(&txn, author_address).await?;
-        txn.commit().await?;
+        let author_address = &self.author;
+        accounts::create(db, author_address).await?;
         Ok(())
     }
 
@@ -363,10 +361,12 @@ impl ActionTriple {
     }
 
     /// This method includes the action_triple in the database
-    pub async fn execute(&self, db: &DatabaseConnection, space_queries: bool) -> Result<(), DbErr> {
-        let txn = db.begin().await?;
-        actions::create(&txn, self).await?;
-        txn.commit().await?;
+    pub async fn execute(
+        &self,
+        db: &DatabaseTransaction,
+        space_queries: bool,
+    ) -> Result<(), DbErr> {
+        actions::create(&db, self).await?;
         Ok(())
     }
 

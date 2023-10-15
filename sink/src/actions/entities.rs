@@ -65,33 +65,34 @@ impl EntityAction<'_> {
 impl<'a> ActionDependencies<'a> for EntityAction<'a> {
     fn dependencies(&self) -> Option<Vec<SinkAction<'a>>> {
         match self {
-            EntityAction::AvatarAdded {
-                space,
-                entity_id,
-                avatar_image,
-            } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
-                space: "",
-                author: "",
-                entity_id,
-            })]),
-            EntityAction::NameAdded {
-                space,
-                entity_id,
-                name,
-            } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
-                space: "",
-                author: "",
-                entity_id,
-            })]),
-            EntityAction::DescriptionAdded {
-                space,
-                entity_id,
-                description,
-            } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
-                space: "",
-                author: "",
-                entity_id,
-            })]),
+            _ => None,
+            // EntityAction::AvatarAdded {
+            //     space,
+            //     entity_id,
+            //     avatar_image,
+            // } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
+            //     space: "",
+            //     author: "",
+            //     entity_id,
+            // })]),
+            // EntityAction::NameAdded {
+            //     space,
+            //     entity_id,
+            //     name,
+            // } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
+            //     space: "",
+            //     author: "",
+            //     entity_id,
+            // })]),
+            // EntityAction::DescriptionAdded {
+            //     space,
+            //     entity_id,
+            //     description,
+            // } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
+            //     space: "",
+            //     author: "",
+            //     entity_id,
+            // })]),
         }
     }
 
