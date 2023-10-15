@@ -1,5 +1,5 @@
 use anyhow::Error;
-use sea_orm::ConnectionTrait;
+use sea_orm::{ConnectionTrait, DatabaseTransaction};
 
 use crate::{
     models::spaces::upsert_cover,
@@ -8,35 +8,35 @@ use crate::{
 
 use super::tables::TableAction;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SpaceAction {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+pub enum SpaceAction<'a> {
     /// Covers can be added to spaces, this is the cover image for the webpage
     CoverAdded {
-        space: String,
-        entity_id: String,
-        cover_image: String,
+        space: &'a str,
+        entity_id: &'a str,
+        cover_image: &'a str,
     },
     /// Spaces can have subspaces, and we need to know when a subspace is added to a space so we can deploy a new subgraph for that space.
     SubspaceAdded {
-        parent_space: String,
-        child_space: String,
+        parent_space: &'a str,
+        child_space: &'a str,
     },
 
     /// Spaces can also remove subspaces, and we need to know when a subspace is removed from a space
     SubspaceRemoved {
-        parent_space: String,
-        child_space: String,
+        parent_space: &'a str,
+        child_space: &'a str,
     },
 }
 
-impl SpaceAction {
-    pub async fn execute(&self, db: &impl ConnectionTrait) -> Result<(), Error> {
+impl SpaceAction<'_> {
+    pub async fn execute(&self, db: &DatabaseTransaction) -> Result<(), Error> {
         match self {
             SpaceAction::CoverAdded {
                 space,
                 entity_id,
                 cover_image,
-            } => upsert_cover(db, space.to_string(), cover_image.to_string()).await?,
+            } => upsert_cover(db, space, cover_image).await?,
             SpaceAction::SubspaceAdded {
                 parent_space,
                 child_space,
@@ -51,17 +51,17 @@ impl SpaceAction {
     }
 }
 
-impl ActionDependencies for SpaceAction {
-    fn dependencies(&self) -> Option<Vec<SinkAction>> {
+impl<'a> ActionDependencies<'a> for SpaceAction<'a> {
+    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>> {
         match self {
             SpaceAction::CoverAdded {
                 space,
                 entity_id,
                 cover_image,
             } => Some(vec![SinkAction::Table(TableAction::SpaceCreated {
-                entity_id: entity_id.into(),
-                space: "".to_string(),
-                created_in_space: "".to_string(),
+                entity_id,
+                space: "",
+                created_in_space: "",
                 author: "".into(),
             })]),
             SpaceAction::SubspaceAdded {
@@ -69,16 +69,16 @@ impl ActionDependencies for SpaceAction {
                 child_space,
             } => Some(vec![
                 SinkAction::Table(TableAction::SpaceCreated {
-                    entity_id: parent_space.into(),
-                    space: "".to_string(),
-                    created_in_space: "".to_string(),
-                    author: "".into(),
+                    entity_id: parent_space,
+                    space: "",
+                    created_in_space: "",
+                    author: "",
                 }),
                 SinkAction::Table(TableAction::SpaceCreated {
-                    entity_id: child_space.into(),
-                    space: "".to_string(),
-                    created_in_space: "".to_string(),
-                    author: "".into(),
+                    entity_id: child_space,
+                    space: "",
+                    created_in_space: "",
+                    author: "",
                 }),
             ]),
             SpaceAction::SubspaceRemoved {
@@ -86,16 +86,16 @@ impl ActionDependencies for SpaceAction {
                 child_space,
             } => Some(vec![
                 SinkAction::Table(TableAction::SpaceCreated {
-                    entity_id: parent_space.into(),
-                    space: "".to_string(),
-                    created_in_space: "".to_string(),
-                    author: "".into(),
+                    entity_id: parent_space,
+                    space: "",
+                    created_in_space: "",
+                    author: "",
                 }),
                 SinkAction::Table(TableAction::SpaceCreated {
-                    entity_id: child_space.into(),
-                    space: "".to_string(),
-                    created_in_space: "".to_string(),
-                    author: "".into(),
+                    entity_id: child_space,
+                    space: "",
+                    created_in_space: "",
+                    author: "",
                 }),
             ]),
         }
@@ -119,34 +119,34 @@ impl ActionDependencies for SpaceAction {
         }
     }
 
-    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction>> {
+    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction<'a>>> {
         None
     }
 
-    fn as_dep(&self) -> SinkAction {
+    fn as_dep(&self) -> SinkAction<'a> {
         match self {
             SpaceAction::CoverAdded {
                 space,
                 entity_id,
                 cover_image,
             } => SinkAction::Space(SpaceAction::CoverAdded {
-                space: space.clone(),
-                entity_id: entity_id.clone(),
-                cover_image: cover_image.clone(),
+                space,
+                entity_id,
+                cover_image,
             }),
             SpaceAction::SubspaceAdded {
                 parent_space,
                 child_space,
             } => SinkAction::Space(SpaceAction::SubspaceAdded {
-                parent_space: parent_space.clone(),
-                child_space: child_space.clone(),
+                parent_space,
+                child_space,
             }),
             SpaceAction::SubspaceRemoved {
                 parent_space,
                 child_space,
             } => SinkAction::Space(SpaceAction::SubspaceRemoved {
-                parent_space: parent_space.clone(),
-                child_space: child_space.clone(),
+                parent_space,
+                child_space,
             }),
         }
     }

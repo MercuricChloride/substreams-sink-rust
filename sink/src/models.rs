@@ -2,7 +2,7 @@
 //! These are going to just hide the implementation details of the database
 //! and provide a nice interface for the rest of the application to use
 
-pub fn table_comment_string(space: &String, entity_id: &String, entity_name: &String) -> String {
+pub fn table_comment_string(space: &str, entity_id: &str, entity_name: &str) -> String {
     format!(
         "DO $$
 BEGIN
@@ -25,13 +25,11 @@ pub mod spaces {
     use entity::spaces::*;
     use migration::{DbErr, OnConflict};
     use sea_orm::{
-        ActiveValue, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, Statement,
+        ActiveValue, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend,
+        EntityTrait, Statement,
     };
 
-    pub async fn create_schema(
-        db: &DatabaseTransaction,
-        schema_name: &String,
-    ) -> Result<(), DbErr> {
+    pub async fn create_schema(db: &DatabaseTransaction, schema_name: &str) -> Result<(), DbErr> {
         let schema_query = format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";");
 
         db.execute(Statement::from_string(DbBackend::Postgres, schema_query))
@@ -68,13 +66,13 @@ pub mod spaces {
     }
 
     pub async fn upsert_cover(
-        db: &impl ConnectionTrait,
-        space: String,
-        cover_image: String,
+        db: &DatabaseTransaction,
+        space: &str,
+        cover_image: &str,
     ) -> Result<(), DbErr> {
         let space = ActiveModel {
-            id: ActiveValue::Set(space),
-            cover: ActiveValue::Set(Some(cover_image)),
+            id: ActiveValue::Set(space.to_string()),
+            cover: ActiveValue::Set(Some(cover_image.to_string())),
             ..Default::default()
         };
 
@@ -90,7 +88,7 @@ pub mod spaces {
         Ok(())
     }
 
-    pub async fn exists(db: &DatabaseTransaction, space: String) -> Result<bool, DbErr> {
+    pub async fn exists(db: &DatabaseTransaction, space: &str) -> Result<bool, DbErr> {
         let space = Entity::find_by_id(space).one(db).await?;
         Ok(space.is_some())
     }
@@ -101,20 +99,20 @@ pub mod entities {
     use entity::{entities::*, entity_attributes, entity_types};
     use migration::{DbErr, OnConflict};
     use sea_orm::{
-        ActiveValue, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, IsolationLevel,
-        Statement, TransactionTrait,
+        ActiveModelTrait, ActiveValue, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+        DbBackend, EntityTrait, IsolationLevel, Statement, TransactionTrait,
     };
 
     use crate::{constants, triples::ValueType};
 
     use super::table_comment_string;
 
-    pub async fn exists(db: &DatabaseTransaction, entity_id: String) -> Result<bool, DbErr> {
+    pub async fn exists(db: &DatabaseTransaction, entity_id: &str) -> Result<bool, DbErr> {
         let entity = Entity::find_by_id(entity_id).one(db).await?;
         Ok(entity.is_some())
     }
 
-    pub async fn create_table(db: &DatabaseTransaction, entity_id: &String) -> Result<(), Error> {
+    pub async fn create_table(db: &DatabaseTransaction, entity_id: &str) -> Result<(), Error> {
         // println!("Creating table for entity {}", entity_id);
 
         let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
@@ -196,10 +194,10 @@ pub mod entities {
     /// prefixed with "parent_", and a reference to the entity's table, which is the entity-id
     pub async fn add_relation(
         db: &DatabaseTransaction,
-        parent_entity_id: &String,
-        attribute_id: &String,
+        parent_entity_id: &str,
+        attribute_id: &str,
         value: &ValueType,
-        space: &String,
+        space: &str,
     ) -> Result<(), Error> {
         let value_entity = Entity::find_by_id(value.id()).one(db).await?;
 
@@ -377,10 +375,10 @@ pub mod entities {
     /// This function handles a type being added to an entity
     /// It populates the type's table with the entity's id
     pub async fn add_type(
-        db: &impl ConnectionTrait,
-        entity_id: &String,
-        type_id: &String,
-        space: &String,
+        db: &DatabaseTransaction,
+        entity_id: &str,
+        type_id: &str,
+        space: &str,
         space_queries: bool,
     ) -> Result<(), DbErr> {
         // create the entity and type if they don't exist
@@ -430,13 +428,13 @@ pub mod entities {
     }
 
     pub async fn create(
-        db: &impl ConnectionTrait,
-        entity_id: String,
-        space: String,
+        db: &DatabaseTransaction,
+        entity_id: &str,
+        space: &str,
     ) -> Result<(), DbErr> {
         let entity = ActiveModel {
-            id: ActiveValue::Set(entity_id),
-            defined_in: ActiveValue::Set(space),
+            id: ActiveValue::Set(entity_id.into()),
+            defined_in: ActiveValue::Set(space.into()),
             ..Default::default()
         };
 
@@ -450,7 +448,7 @@ pub mod entities {
     }
 
     pub async fn upsert_value_type(
-        db: &impl ConnectionTrait,
+        db: &DatabaseTransaction,
         entity_id: String,
         value_type: String,
         space: String,
@@ -481,27 +479,33 @@ pub mod entities {
     }
 
     pub async fn upsert_name(
-        db: &impl ConnectionTrait,
-        entity_id: String,
-        name: String,
-        space: String,
+        db: &DatabaseTransaction,
+        entity_id: &str,
+        name: &str,
+        space: &str,
         space_queries: bool,
     ) -> Result<(), DbErr> {
-        let entity = ActiveModel {
-            id: ActiveValue::Set(entity_id.clone()),
-            name: ActiveValue::Set(Some(name.clone())),
-            defined_in: ActiveValue::Set(space.clone()),
-            ..Default::default()
-        };
-
-        Entity::insert(entity)
-            .on_conflict(
-                OnConflict::column(Column::Id)
-                    .update_column(Column::Name)
-                    .to_owned(),
-            )
-            .exec(db)
-            .await?;
+        let entity = Entity::find_by_id(entity_id).one(db).await?;
+        if let Some(entity) = entity {
+            let mut entity: ActiveModel = entity.into();
+            entity.name = ActiveValue::Set(Some(name.to_string()));
+            entity.save(db).await?;
+        } else {
+            let entity = ActiveModel {
+                id: ActiveValue::Set(entity_id.to_string()),
+                name: ActiveValue::Set(Some(name.to_string())),
+                defined_in: ActiveValue::Set(space.to_string()),
+                ..Default::default()
+            };
+            Entity::insert(entity)
+                .on_conflict(
+                    OnConflict::column(Column::Id)
+                        .update_column(Column::Name)
+                        .to_owned(),
+                )
+                .exec(db)
+                .await?;
+        }
 
         // if the entity is a type, we need to add a comment updating the name of the table
         if space_queries {
@@ -520,11 +524,10 @@ pub mod entities {
                         ))
                         .await;
                     if let Err(err) = result {
-                        // println!(
-                        //     "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
-                        //     entity_id, space, err
-                        // );
-                        // println!("Comment: {}", table_comment);
+                        println!(
+                            "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
+                            entity_id, space, err
+                        );
                     }
                 }
             }
@@ -562,51 +565,46 @@ pub mod entities {
     }
 
     pub async fn upsert_description(
-        db: &impl ConnectionTrait,
-        entity_id: String,
-        description: String,
-        space: String,
+        db: &DatabaseTransaction,
+        entity_id: &str,
+        description: &str,
+        space: &str,
     ) -> Result<(), DbErr> {
-        let entity = ActiveModel {
-            id: ActiveValue::Set(entity_id),
-            description: ActiveValue::Set(Some(description)),
-            defined_in: ActiveValue::Set(space),
-            ..Default::default()
-        };
+        if let Some(entity) = Entity::find_by_id(entity_id).one(db).await? {
+            let mut entity: ActiveModel = entity.into();
+            entity.description = ActiveValue::Set(Some(description.to_string()));
+            entity.save(db).await?;
+        } else {
+            let entity = ActiveModel {
+                id: ActiveValue::Set(entity_id.to_string()),
+                description: ActiveValue::Set(Some(description.to_string())),
+                defined_in: ActiveValue::Set(space.to_string()),
+                ..Default::default()
+            };
 
-        Entity::insert(entity)
-            .on_conflict(
-                OnConflict::column(Column::Id)
-                    .update_column(Column::Description)
-                    .to_owned(),
-            )
-            .exec(db)
-            .await?;
+            Entity::insert(entity)
+                .on_conflict(
+                    OnConflict::column(Column::Id)
+                        .update_column(Column::Description)
+                        .to_owned(),
+                )
+                .exec(db)
+                .await?;
+        }
 
         Ok(())
     }
 
     pub async fn upsert_is_type(
-        db: &impl ConnectionTrait,
-        entity_id: String,
+        db: &DatabaseTransaction,
+        entity_id: &str,
         is_type: bool,
-        space: &String,
+        space: &str,
     ) -> Result<(), DbErr> {
-        let entity = Entity::find_by_id(entity_id.to_string()).one(db).await?;
-
-        if let Some(entity) = entity {
-            if let Some(entity_is_type) = entity.is_type {
-                // if the entities type is the same as we want to set return early.
-                if is_type == entity_is_type {
-                    return Ok(());
-                }
-            }
-        }
-
         let entity = ActiveModel {
-            id: ActiveValue::Set(entity_id),
+            id: ActiveValue::Set(entity_id.to_string()),
             is_type: ActiveValue::Set(Some(is_type)),
-            defined_in: ActiveValue::Set(space.clone()),
+            defined_in: ActiveValue::Set(space.to_string()),
             ..Default::default()
         };
 
@@ -624,7 +622,7 @@ pub mod entities {
 
     /// !!!NOTE!!! attribute_of_id is the id of the entity we are adding an attribute to
     pub async fn add_attribute(
-        db: &impl ConnectionTrait,
+        db: &DatabaseTransaction,
         entity_id: String,
         attribute_of_id: String,
     ) -> Result<(), DbErr> {
@@ -714,9 +712,9 @@ pub mod cursor {
 pub mod accounts {
     use entity::accounts::*;
     use migration::{DbErr, OnConflict};
-    use sea_orm::{ActiveValue, ConnectionTrait, EntityTrait};
+    use sea_orm::{ActiveValue, ConnectionTrait, DatabaseTransaction, EntityTrait};
 
-    pub async fn create(db: &impl ConnectionTrait, address: String) -> Result<(), DbErr> {
+    pub async fn create(db: &DatabaseTransaction, address: String) -> Result<(), DbErr> {
         let account = Entity::find_by_id(address.clone()).one(db).await?;
 
         if let None = account {
@@ -757,12 +755,12 @@ pub mod triples {
     use super::triple_exists_string;
 
     pub async fn create(
-        db: &impl ConnectionTrait,
-        entity_id: String,
-        attribute_id: String,
-        value: ValueType,
-        space: String,
-        author: String,
+        db: &DatabaseTransaction,
+        entity_id: &str,
+        attribute_id: &str,
+        value: &ValueType,
+        space: &str,
+        author: &str,
     ) -> Result<(), DbErr> {
         // create the entity and attribute and value if they don't exist
         //super::entities::create(db, entity_id.clone(), space.clone()).await?;
@@ -771,16 +769,16 @@ pub mod triples {
 
         let id = format!("{}", Uuid::new_v4());
 
-        if let Some(_) = Entity::find_by_id(id.clone()).one(db).await? {
+        if let Some(_) = Entity::find_by_id(&id).one(db).await? {
             return Ok(());
         } else {
             let mut triple = ActiveModel {
                 id: Set(id.clone()),
-                entity_id: Set(entity_id),
-                attribute_id: Set(attribute_id),
+                entity_id: Set(entity_id.to_string()),
+                attribute_id: Set(attribute_id.to_string()),
                 value_id: Set(value.id().to_string()),
                 value_type: Set(value.value_type().to_string()),
-                defined_in: Set(space),
+                defined_in: Set(space.to_string()),
                 is_protected: Set(false),
                 ..Default::default()
             };
@@ -790,19 +788,19 @@ pub mod triples {
                     triple.number_value = ActiveValue::Set(Some(value.to_string()));
                 }
                 ValueType::String { id: _, value } => {
-                    triple.string_value = ActiveValue::Set(Some(value));
+                    triple.string_value = ActiveValue::Set(Some(value.to_string()));
                 }
                 ValueType::Image { id: _, value } => {
-                    triple.string_value = ActiveValue::Set(Some(value));
+                    triple.string_value = ActiveValue::Set(Some(value.to_string()));
                 }
                 ValueType::Entity { id } => {
-                    triple.entity_value = ActiveValue::Set(Some(id));
+                    triple.entity_value = ActiveValue::Set(Some(id.to_string()));
                 }
                 ValueType::Date { id: _, value } => {
-                    triple.string_value = ActiveValue::Set(Some(value));
+                    triple.string_value = ActiveValue::Set(Some(value.to_string()));
                 }
                 ValueType::Url { id: _, value } => {
-                    triple.string_value = ActiveValue::Set(Some(value));
+                    triple.string_value = ActiveValue::Set(Some(value.to_string()));
                 }
             }
 
@@ -818,16 +816,16 @@ pub mod triples {
 
     pub async fn delete(
         db: &DatabaseTransaction,
-        entity_id: String,
-        attribute_id: String,
-        value: ValueType,
-        space: String,
-        author: String,
+        entity_id: &str,
+        attribute_id: &str,
+        value: &ValueType,
+        space: &str,
+        author: &str,
     ) -> Result<(), DbErr> {
         let triple = Entity::find()
-            .filter(Column::EntityId.contains(entity_id.clone()))
-            .filter(Column::AttributeId.contains(attribute_id.clone()))
-            .filter(Column::ValueId.contains(value.id().to_string()))
+            .filter(Column::EntityId.contains(entity_id))
+            .filter(Column::AttributeId.contains(attribute_id))
+            .filter(Column::ValueId.contains(value.id()))
             .one(db)
             .await?;
 
@@ -855,13 +853,13 @@ pub mod triples {
         for entity in Entities::iter() {
             // make an entity for the attribute
             let entity_id = entity.id();
-            entities::create(db, entity_id.into(), space.to_string()).await?;
+            entities::create(db, entity_id, &space).await?;
         }
 
         for attribute in Attributes::iter() {
             // make an entity for the attribute
             let entity_id = attribute.id();
-            entities::create(db, entity_id.into(), space.to_string()).await?;
+            entities::create(db, entity_id.into(), &space).await?;
         }
 
         for attribute in Attributes::iter() {
@@ -973,7 +971,7 @@ pub mod triples {
 
         let mut default = Vec::new();
         let mut optional = Vec::new();
-        for action_triple in action_triples {
+        for action_triple in action_triples.iter() {
             let (sink_action, option_action) = action_triple.get_sink_actions();
             default.push(sink_action);
 
@@ -1015,7 +1013,9 @@ pub mod triples {
             .await?;
 
         if let Some(result) = result {
-            let exists: bool = result.try_get_by_index(0 as usize).unwrap();
+            let exists: bool = result
+                .try_get_by_index(0 as usize)
+                .expect("COULDN'T GET EXISTS");
             return Ok(exists);
         } else {
             return Ok(false);
@@ -1028,13 +1028,14 @@ pub mod actions {
     use entity::actions::*;
     use migration::{DbErr, OnConflict};
     use sea_orm::ConnectionTrait;
+    use sea_orm::DatabaseTransaction;
     use sea_orm::EntityTrait;
     use sea_orm::Set;
 
     use crate::triples::{ActionTriple, ValueType};
 
     pub async fn create(
-        db: &impl ConnectionTrait,
+        db: &DatabaseTransaction,
         action_triple: &ActionTriple,
     ) -> Result<(), DbErr> {
         let id = format!("{}", uuid::Uuid::new_v4());

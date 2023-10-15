@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::actions::entities::EntityAction;
 use crate::actions::general::GeneralAction;
 use crate::actions::spaces::SpaceAction;
@@ -35,12 +37,12 @@ use tokio_stream::StreamExt;
 ///
 /// The reason for this is just so we can keep track of what actions we have taken in the database.
 /// In addition to specific actions that should do special things, which are the rest of the variants.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub enum SinkAction {
-    Table(TableAction),
-    Space(SpaceAction),
-    Entity(EntityAction),
-    General(GeneralAction),
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Copy)]
+pub enum SinkAction<'a> {
+    Table(TableAction<'a>),
+    Space(SpaceAction<'a>),
+    Entity(EntityAction<'a>),
+    General(GeneralAction<'a>),
 }
 
 /// This enum represents the different dependencies that a sink action can have.
@@ -67,201 +69,21 @@ pub enum SinkActionDependencies<'a> {
     },
 }
 
-impl SinkActionDependencies<'_> {
-    /// This function takes in a sink action and returns the kind of dependency it satisfies if any
-    pub fn from_action(action: &SinkAction) -> Option<Vec<SinkActionDependencies>> {
-        match action {
-            SinkAction::Table(table) => {
-                if let TableAction::TypeAdded {
-                    type_id,
-                    space,
-                    entity_id,
-                } = table
-                {
-                    if type_id == Entities::SchemaType.id() {
-                        return Some(vec![SinkActionDependencies::IsType { type_id }]);
-                    }
-
-                    if type_id == Entities::Attribute.id() {
-                        return Some(vec![SinkActionDependencies::IsAttribute { entity_id }]);
-                    }
-                }
-
-                if let TableAction::SpaceCreated {
-                    entity_id,
-                    space,
-                    created_in_space,
-                    author,
-                } = table
-                {
-                    return Some(vec![SinkActionDependencies::IsSpace { entity_id }]);
-                }
-
-                if let TableAction::ValueTypeAdded {
-                    entity_id,
-                    value_type,
-                    ..
-                } = table
-                {
-                    return Some(vec![SinkActionDependencies::ValueTypeMatches {
-                        attribute_id: entity_id,
-                        value_type,
-                    }]);
-                }
-            }
-            // SinkAction::General(general) => {
-            //if let GeneralAction::TripleAdded { space, entity_id, attribute_id, value, author } = general {
-            //return Some(vec![SinkActionDependencies::Exists { entity_id }, SinkActionDependencies::Exists { entity_id: attribute_id }]);
-            //}
-            // TODO Add attribute exists?
-            // Not sure I need this
-            // }
-            _ => {}
-        };
-        None
-    }
-
-    pub fn match_action<'a>(&'a self, action: &'a SinkAction) -> Option<&SinkAction> {
-        match self {
-            SinkActionDependencies::IsType { type_id: entity } => {
-                if let SinkAction::Table(table) = action {
-                    if let TableAction::TypeAdded {
-                        type_id,
-                        space,
-                        entity_id,
-                    } = table
-                    {
-                        if entity_id == entity && type_id == Entities::SchemaType.id() {
-                            return Some(action);
-                        }
-                    }
-                }
-            }
-            SinkActionDependencies::IsAttribute { entity_id: entity } => {
-                if let SinkAction::Table(table) = action {
-                    if let TableAction::TypeAdded {
-                        type_id,
-                        space,
-                        entity_id,
-                    } = table
-                    {
-                        if entity_id == entity && type_id == Entities::Attribute.id() {
-                            return Some(action);
-                        }
-                    }
-                }
-            }
-            SinkActionDependencies::IsSpace {
-                entity_id: space_id,
-            } => {
-                if let SinkAction::Table(table) = action {
-                    if let TableAction::SpaceCreated {
-                        entity_id,
-                        space,
-                        created_in_space,
-                        author,
-                    } = table
-                    {
-                        if space_id == entity_id {
-                            return Some(action);
-                        }
-                    }
-                }
-            }
-            SinkActionDependencies::Exists { entity_id } => {
-                if let SinkAction::General(general) = action {
-                    match general {
-                        GeneralAction::EntityCreated {
-                            space,
-                            entity_id,
-                            author,
-                        } => {
-                            if entity_id == entity_id {
-                                return Some(action);
-                            }
-                        }
-                        GeneralAction::TripleAdded {
-                            space,
-                            entity_id,
-                            attribute_id,
-                            value,
-                            author,
-                        } => {
-                            if entity_id == entity_id
-                                || attribute_id == entity_id
-                                || value.id() == entity_id
-                            {
-                                return Some(action);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        };
-        None
-    }
-
-    pub async fn check_db(&self, db: &DatabaseTransaction) -> bool {
-        use entity::entities;
-        use entity::entity_types;
-        use entity::spaces;
-        match self {
-            SinkActionDependencies::IsType { type_id: entity } => {
-                let entity = entities::Entity::find_by_id(*entity).one(db).await.unwrap();
-                if entity.is_none() {
-                    return false;
-                }
-            }
-            SinkActionDependencies::IsAttribute { entity_id: entity } => {
-                let ent = entity_types::Entity::find()
-                    .filter(entity_types::Column::EntityId.contains(*entity))
-                    .one(db)
-                    .await
-                    .unwrap();
-                if ent.is_none() {
-                    return false;
-                }
-            }
-            SinkActionDependencies::IsSpace {
-                entity_id: space_id,
-            } => {
-                let space = spaces::Entity::find_by_id(*space_id).one(db).await.unwrap();
-                if space.is_none() {
-                    return false;
-                }
-            }
-            SinkActionDependencies::Exists { entity_id } => {
-                let entity = entities::Entity::find_by_id(*entity_id)
-                    .one(db)
-                    .await
-                    .unwrap();
-                if entity.is_none() {
-                    return false;
-                }
-            }
-            _ => {}
-        };
-        true
-    }
-}
-
-pub trait ActionDependencies {
+pub trait ActionDependencies<'a> {
     /// This function should return the dependencies of this action
-    fn dependencies(&self) -> Option<Vec<SinkAction>>;
+    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>>;
     /// If this action has a fallback, this function should return true
     fn has_fallback(&self) -> bool;
     /// If this action has a fallback, this function should return the fallback actions
     /// to mend the graph. These should always succeed
-    fn fallback(&self) -> Option<Vec<SinkAction>>;
+    fn fallback(&self) -> Option<Vec<SinkAction<'a>>>;
     /// This function is used to return a sink action, as a "dependency node"
     /// Which is just a sink action, without an author or space.
-    fn as_dep(&self) -> SinkAction;
+    fn as_dep(&self) -> SinkAction<'a>;
 }
 
-impl ActionDependencies for SinkAction {
-    fn dependencies(&self) -> Option<Vec<SinkAction>> {
+impl<'a> ActionDependencies<'a> for SinkAction<'a> {
+    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>> {
         match self {
             SinkAction::Table(table) => table.dependencies(),
             SinkAction::Space(space) => space.dependencies(),
@@ -279,7 +101,7 @@ impl ActionDependencies for SinkAction {
         }
     }
 
-    fn fallback(&self) -> Option<Vec<SinkAction>> {
+    fn fallback(&self) -> Option<Vec<SinkAction<'a>>> {
         match self {
             SinkAction::Table(table) => table.fallback(),
             SinkAction::Space(space) => space.fallback(),
@@ -288,7 +110,7 @@ impl ActionDependencies for SinkAction {
         }
     }
 
-    fn as_dep(&self) -> SinkAction {
+    fn as_dep(&self) -> SinkAction<'a> {
         match self {
             SinkAction::Table(table) => table.as_dep(),
             SinkAction::Space(space) => space.as_dep(),
@@ -299,7 +121,7 @@ impl ActionDependencies for SinkAction {
 }
 
 pub async fn handle_sink_actions(
-    actions: &Vec<SinkAction>,
+    actions: &Vec<SinkAction<'_>>,
     txn: &DatabaseTransaction,
     use_space_queries: bool,
     max_connections: usize,
@@ -327,7 +149,7 @@ pub async fn handle_sink_actions(
     Ok(())
 }
 
-impl SinkAction {
+impl<'a> SinkAction<'a> {
     pub async fn execute(
         &self,
         db: &DatabaseTransaction,

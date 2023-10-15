@@ -1,5 +1,5 @@
 use anyhow::Error;
-use sea_orm::{ConnectionTrait, DatabaseTransaction};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DatabaseTransaction};
 
 use crate::{
     constants::Entities,
@@ -11,36 +11,36 @@ use crate::{
 
 use super::tables::TableAction;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum GeneralAction {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
+pub enum GeneralAction<'a> {
     /// If we don't have any specific task to take, we will just add the triple to the graph
     TripleAdded {
-        space: String,
-        entity_id: String,
-        attribute_id: String,
-        value: ValueType,
-        author: String,
+        space: &'a str,
+        entity_id: &'a str,
+        attribute_id: &'a str,
+        value: &'a ValueType,
+        author: &'a str,
     },
 
     /// If it's an entity creation action, we need to add the entity to the graph
     EntityCreated {
-        space: String,
-        entity_id: String,
-        author: String,
+        space: &'a str,
+        entity_id: &'a str,
+        author: &'a str,
     },
 
     /// If it's a triple deletion action, we need to remove the entity from the graph
     TripleDeleted {
-        space: String,
-        entity_id: String,
-        attribute_id: String,
-        value: ValueType,
-        author: String,
+        space: &'a str,
+        entity_id: &'a str,
+        attribute_id: &'a str,
+        value: &'a ValueType,
+        author: &'a str,
     },
 }
 
-impl GeneralAction {
-    pub async fn execute(&self, db: &DatabaseTransaction) -> Result<(), Error> {
+impl GeneralAction<'_> {
+    pub async fn execute(self, db: &DatabaseTransaction) -> Result<(), Error> {
         match self {
             GeneralAction::TripleAdded {
                 space,
@@ -48,42 +48,19 @@ impl GeneralAction {
                 attribute_id,
                 value,
                 author,
-            } => {
-                triples::create(
-                    db,
-                    entity_id.into(),
-                    attribute_id.into(),
-                    value.clone(),
-                    space.into(),
-                    author.into(),
-                )
-                .await?
-            }
+            } => triples::create(db, entity_id, attribute_id, value, space, author).await?,
             GeneralAction::EntityCreated {
                 space,
                 entity_id,
                 author,
-            } => {
-                let space = space.to_lowercase();
-                entities::create(db, entity_id.into(), space).await?
-            }
+            } => entities::create(db, entity_id, space).await?,
             GeneralAction::TripleDeleted {
                 space,
                 entity_id,
                 attribute_id,
                 value,
                 author,
-            } => {
-                triples::delete(
-                    db,
-                    entity_id.into(),
-                    attribute_id.into(),
-                    value.clone(),
-                    space.into(),
-                    author.into(),
-                )
-                .await?
-            }
+            } => triples::delete(db, entity_id, attribute_id, value, space, author).await?,
         };
         Ok(())
     }
@@ -94,14 +71,14 @@ impl GeneralAction {
                 space,
                 entity_id,
                 author,
-            } => Ok(entities::exists(db, entity_id.into()).await?),
+            } => Ok(entities::exists(db, entity_id).await?),
             _ => todo!("check_if_exists for general action but not entity created"),
         }
     }
 }
 
-impl ActionDependencies for GeneralAction {
-    fn dependencies(&self) -> Option<Vec<SinkAction>> {
+impl<'a> ActionDependencies<'a> for GeneralAction<'a> {
+    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>> {
         match self {
             GeneralAction::TripleAdded {
                 space,
@@ -112,18 +89,18 @@ impl ActionDependencies for GeneralAction {
             } => Some(vec![
                 SinkAction::General(GeneralAction::EntityCreated {
                     space: "".into(),
-                    entity_id: entity_id.into(),
                     author: "".into(),
+                    entity_id,
                 }),
                 SinkAction::General(GeneralAction::EntityCreated {
                     space: "".into(),
-                    entity_id: attribute_id.into(),
                     author: "".into(),
+                    entity_id: attribute_id,
                 }),
                 SinkAction::Table(TableAction::TypeAdded {
                     space: "".into(),
-                    entity_id: attribute_id.into(),
                     type_id: Entities::Attribute.id().into(),
+                    entity_id: attribute_id,
                 }),
             ]),
             GeneralAction::TripleDeleted {
@@ -135,17 +112,17 @@ impl ActionDependencies for GeneralAction {
             } => Some(vec![
                 SinkAction::General(GeneralAction::EntityCreated {
                     space: "".into(),
-                    entity_id: entity_id.into(),
                     author: "".into(),
+                    entity_id,
                 }),
                 SinkAction::General(GeneralAction::EntityCreated {
                     space: "".into(),
-                    entity_id: attribute_id.into(),
+                    entity_id: attribute_id,
                     author: "".into(),
                 }),
                 SinkAction::Table(TableAction::TypeAdded {
                     space: "".into(),
-                    entity_id: attribute_id.into(),
+                    entity_id: attribute_id,
                     type_id: Entities::Attribute.id().into(),
                 }),
             ]),
@@ -181,7 +158,7 @@ impl ActionDependencies for GeneralAction {
         }
     }
 
-    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction>> {
+    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction<'a>>> {
         match self {
             GeneralAction::TripleAdded {
                 space,
@@ -205,7 +182,7 @@ impl ActionDependencies for GeneralAction {
         }
     }
 
-    fn as_dep(&self) -> SinkAction {
+    fn as_dep(&self) -> SinkAction<'a> {
         match self {
             GeneralAction::TripleAdded {
                 space,
@@ -215,9 +192,9 @@ impl ActionDependencies for GeneralAction {
                 author,
             } => SinkAction::General(GeneralAction::TripleAdded {
                 space: "".into(),
-                entity_id: entity_id.into(),
-                attribute_id: attribute_id.into(),
-                value: value.clone(),
+                entity_id,
+                attribute_id,
+                value,
                 author: "".into(),
             }),
             GeneralAction::EntityCreated {
@@ -226,7 +203,7 @@ impl ActionDependencies for GeneralAction {
                 author,
             } => SinkAction::General(GeneralAction::EntityCreated {
                 space: "".into(),
-                entity_id: entity_id.into(),
+                entity_id,
                 author: "".into(),
             }),
             GeneralAction::TripleDeleted {
@@ -237,9 +214,9 @@ impl ActionDependencies for GeneralAction {
                 author,
             } => SinkAction::General(GeneralAction::TripleDeleted {
                 space: "".into(),
-                entity_id: entity_id.into(),
-                attribute_id: attribute_id.into(),
-                value: value.clone(),
+                entity_id,
+                attribute_id,
+                value,
                 author: "".into(),
             }),
         }
