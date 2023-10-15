@@ -88,13 +88,14 @@ impl GeneralAction {
         Ok(())
     }
 
-
     pub async fn check_if_exists(&self, db: &DatabaseTransaction) -> Result<bool, Error> {
         match self {
-            GeneralAction::EntityCreated { space, entity_id, author } => {
-                Ok(entities::exists(db, entity_id.into()).await?)
-            }
-            _ => todo!("check_if_exists for general action but not entity created")
+            GeneralAction::EntityCreated {
+                space,
+                entity_id,
+                author,
+            } => Ok(entities::exists(db, entity_id.into()).await?),
+            _ => todo!("check_if_exists for general action but not entity created"),
         }
     }
 }

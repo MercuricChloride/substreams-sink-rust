@@ -47,7 +47,7 @@ pub mod spaces {
         created_in_space: String,
     ) -> Result<(), DbErr> {
         // make the entity for the space if it doesn't exist
-        super::entities::create(db, space_id.clone(), created_in_space).await?;
+        //super::entities::create(db, space_id.clone(), created_in_space).await?;
 
         let space = ActiveModel {
             id: ActiveValue::Set(space_id),
@@ -115,7 +115,7 @@ pub mod entities {
     }
 
     pub async fn create_table(db: &DatabaseTransaction, entity_id: &String) -> Result<(), Error> {
-        println!("Creating table for entity {}", entity_id);
+        // println!("Creating table for entity {}", entity_id);
 
         let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
 
@@ -160,10 +160,10 @@ pub mod entities {
             if let Ok(result) = result {
                 table_create_result = Some(result);
             } else if retry_count == 3 {
-                println!(
-                    "Couldn't create table for entity {} for space {}. \n\n {:?}",
-                    entity_id, &entity.defined_in, result
-                );
+                // println!(
+                //     "Couldn't create table for entity {} for space {}. \n\n {:?}",
+                //     entity_id, &entity.defined_in, result
+                // );
             } else {
                 retry_count += 1;
             }
@@ -180,11 +180,11 @@ pub mod entities {
                 ))
                 .await;
             if let Err(err) = result {
-                println!(
-                    "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
-                    entity_id, entity.defined_in, err
-                );
-                println!("Comment: {}", table_comment);
+                // println!(
+                //     "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
+                //     entity_id, entity.defined_in, err
+                // );
+                // println!("Comment: {}", table_comment);
             }
         }
 
@@ -219,10 +219,10 @@ pub mod entities {
 
         if is_relation {
             let child_entity_id = value.id();
-            println!(
-                "Adding relation from child {} to parent {} for space {}",
-                child_entity_id, parent_entity_id, space
-            );
+            // println!(
+            //     "Adding relation from child {} to parent {} for space {}",
+            //     child_entity_id, parent_entity_id, space
+            // );
 
             // grab the entity of the child
             let child_entity = Entity::find_by_id(child_entity_id).one(db).await?;
@@ -384,9 +384,9 @@ pub mod entities {
         space_queries: bool,
     ) -> Result<(), DbErr> {
         // create the entity and type if they don't exist
-        create(db, entity_id.clone(), space.clone()).await?;
+        //create(db, entity_id.clone(), space.clone()).await?;
 
-        create(db, type_id.clone(), space.clone()).await?;
+        //create(db, type_id.clone(), space.clone()).await?;
 
         let entity = entity_types::ActiveModel {
             id: ActiveValue::Set(format!("{}-{}", entity_id, type_id)),
@@ -408,10 +408,10 @@ pub mod entities {
                 .unwrap()
                 .defined_in;
 
-            println!(
-                "Adding type {} to entity {} for space {}",
-                type_id, entity_id, space
-            );
+            // println!(
+            //     "Adding type {} to entity {} for space {}",
+            //     type_id, entity_id, space
+            // );
 
             if !type_space.is_empty() && !type_id.is_empty() && !entity_id.is_empty() {
                 let type_insert_statement = format!(
@@ -520,11 +520,11 @@ pub mod entities {
                         ))
                         .await;
                     if let Err(err) = result {
-                        println!(
-                            "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
-                            entity_id, space, err
-                        );
-                        println!("Comment: {}", table_comment);
+                        // println!(
+                        //     "Couldn't add comment to table for entity {} for space {}. \n\n {:?}",
+                        //     entity_id, space, err
+                        // );
+                        // println!("Comment: {}", table_comment);
                     }
                 }
             }

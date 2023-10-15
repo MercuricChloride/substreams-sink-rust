@@ -254,9 +254,8 @@ async fn handle_action(
     }
 
     let txn = db
-        .begin_with_config(Some(IsolationLevel::Serializable), None)
+        .begin_with_config(Some(IsolationLevel::ReadUncommitted), None)
         .await?;
-
     try_action(all_sink_actions, txn, use_space_queries).await?;
     Ok(())
 }
@@ -277,60 +276,32 @@ async fn try_action(
     let mut dependency_edges: Vec<(SinkAction, SinkAction)> = Vec::new();
 
     while let Some(action) = actions.pop_front() {
+        let mut dependencies_met = true;
+
         if let Some(dependencies) = action.dependencies() {
-            // handle the dependencies
-            let mut dependencies_met = true;
+            // check all of the dependencies of the action
             for dep in dependencies {
-                let exists_in_db = dep.check_if_exists(&txn).await?;
-                let dependency_met = dependency_nodes
-                    .entry(dep.clone())
-                    .or_insert(exists_in_db);
+                let exists_in_graph = dependency_nodes.entry(dep.clone()).or_insert(false);
+                let exists_in_db = *exists_in_graph || dep.check_if_exists(&txn).await?;
+                *exists_in_graph = exists_in_db;
 
-                if exists_in_db && *dependency_met == false {
-                    // if the dependency exists in the database, but not in the graph, we need to add it to the graph
-                    *dependency_met = true;
-                }
-
-                if !*dependency_met {
-                    // add an edge between the action and the dependency
+                // if the dependency still isn't met, we need to add an edge between the action and the dependency
+                // and set the dependencies_met flag to false
+                if !exists_in_db {
                     dependency_edges.push((action.clone(), dep));
                     dependencies_met = false;
                 }
             }
+        }
 
-            if dependencies_met {
-                action.execute(&txn, use_space_queries).await?;
-
-                let as_dep = action.as_dep();
-                dependency_nodes.insert(as_dep.clone(), true);
-
-                // loop through the dependency edges and remove any edges that have the action as a dependent
-                // and push them to the action queue
-                dependency_edges = dependency_edges
-                    .into_iter()
-                    .filter(|(action, dep)| {
-                        if dep == &as_dep {
-                            waiting_queue.push_back(action.clone());
-                            false
-                        } else {
-                            true
-                        }
-                    })
-                    .collect();
-            } else {
-                // add the action to the waiting queue
-                waiting_queue.push_back(action);
-            }
-        } else {
-            println!("Executing og action: {:?}", action);
-            // if there are no dependencies, we can execute the action
+        if dependencies_met {
+            //println!("Executing action: {:?}", action);
             action.execute(&txn, use_space_queries).await?;
 
             let as_dep = action.as_dep();
             dependency_nodes.insert(as_dep.clone(), true);
 
-            // loop through the dependency edges and remove any edges that have the action as a dependent
-            // and push them to the action queue
+            // Create a list of actions that were dependent on the action we just executed
             let mut dependent_actions = Vec::new();
             dependency_edges = dependency_edges
                 .into_iter()
@@ -346,7 +317,7 @@ async fn try_action(
 
             for action in dependent_actions {
                 // if we can't find the action in the dependency edges, we can add it to the waiting queue
-                // otherwise, we need to wait until the dependency is met
+                // otherwise, it still has dependencies that need to be met
                 if dependency_edges
                     .iter()
                     .find(|(a, _)| a == &action)
@@ -355,67 +326,78 @@ async fn try_action(
                     waiting_queue.push_back(action);
                 }
             }
+        } else {
+            //println!("Dependencies not yet met for action: {:?}", action);
+            waiting_queue.push_back(action.clone());
         }
     }
 
     while let Some(action) = waiting_queue.pop_front() {
-        if let Some(dependencies) = action.dependencies() {
-            // handle the dependencies
-            let mut dependencies_met = true;
-            for dep in dependencies {
-                let exists_in_db = dep.check_if_exists(&txn).await?;
-                let exists_in_graph = dependency_nodes.entry(dep.clone()).or_insert(exists_in_db);
-                let dependency_met = exists_in_db || *exists_in_graph;
-                println!("Dependency {:?} is met {}?", dep, dependencies_met);
-                if dependency_met {
-                    dependency_edges = dependency_edges
-                        .into_iter()
-                        .filter(|(action, depend)| {
-                            if depend == &dep {
-                                waiting_queue.push_back(action.clone());
-                                false
-                            } else {
-                                true
-                            }
-                        })
-                        .collect();
-                } else {
-                    dependencies_met = false;
+        let mut dependencies_met = true;
+
+        // Fallback actions are the default actions that should be executed
+        if let Some(fallback_actions) = action.fallback() {
+            let mut actions_to_take = Vec::new();
+            for fallback_action in fallback_actions.into_iter() {
+                if !fallback_action.check_if_exists(&txn).await? {
+                    actions_to_take.push(fallback_action);
                 }
             }
 
-            if dependencies_met {
-                action.execute(&txn, use_space_queries).await?;
-
-                let as_dep = action.as_dep();
+            for fallback_action in actions_to_take.into_iter() {
+                fallback_action.execute(&txn, use_space_queries).await?;
+                let as_dep = fallback_action.as_dep();
                 dependency_nodes.insert(as_dep.clone(), true);
-
-                // loop through the dependency edges and remove any edges that have the action as a dependent
-                // and push them to the action queue
-                dependency_edges = dependency_edges
-                    .into_iter()
-                    .filter(|(action, dep)| {
-                        if dep == &as_dep {
-                            waiting_queue.push_back(action.clone());
-                            false
-                        } else {
-                            true
-                        }
-                    })
-                    .collect();
-            } else {
-                println!("Dependencies not met for action: {:?}", action);
             }
+        }
+
+        if let Some(dependencies) = action.dependencies() {
+            // handle the dependencies
+            for dep in dependencies {
+                let exists_in_graph = dependency_nodes.entry(dep.clone()).or_insert(false);
+                let exists_in_db = *exists_in_graph || dep.check_if_exists(&txn).await?;
+                *exists_in_graph = exists_in_db;
+                if !exists_in_db {
+                    //println!("Dependency {:?} not met for action: {:?}", dep, action);
+                    dependencies_met = false;
+                }
+            }
+        }
+
+        if dependencies_met {
+            //println!("Executing waiting list action: {:?}", action);
+            action.execute(&txn, use_space_queries).await?;
+
+            let as_dep = action.as_dep();
+            dependency_nodes.insert(as_dep.clone(), true);
+
+            // loop through the dependency edges and remove any edges that have this action as a dependent
+            // and push them to the action queue
+            dependency_edges = dependency_edges
+                .into_iter()
+                .filter(|(act, dep)| {
+                    if act == &action {
+                        //waiting_queue.push_back(action.clone());
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+        } else {
+            //println!("Dependencies not met for action: {:?}", action);
+            waiting_queue.push_back(action.clone());
         }
     }
 
     if !dependency_edges.is_empty() {
         let dependency_len = dependency_edges.len();
+        txn.commit().await?;
         println!("Initial Actions {initial_len} actions. \n Actions Left: {dependency_len}.\n\n REMAINING ACTIONS: {}", dependency_edges.iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("\n\n"));
         return Err(format_err!("Dependency edges remaining"));
+    } else {
+        txn.commit().await?;
     }
-
-    txn.commit().await?;
 
     Ok(())
 }
@@ -592,7 +574,7 @@ mod tests {
 
         dotenv().ok();
 
-        let max_connections = 199;
+        let max_connections = 499;
         let database_url = std::env::var("DATABASE_URL").unwrap();
 
         let mut connection_options = ConnectOptions::new(database_url);

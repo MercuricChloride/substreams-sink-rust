@@ -122,7 +122,7 @@ impl ActionDependencies for EntityAction {
     }
 
     fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction>> {
-        todo!()
+        None
     }
 
     fn as_dep(&self) -> SinkAction {

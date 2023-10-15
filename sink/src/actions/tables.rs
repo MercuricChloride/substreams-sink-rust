@@ -2,7 +2,7 @@ use anyhow::Error;
 use sea_orm::DatabaseTransaction;
 
 use crate::{
-    constants::{self, Entities, Attributes},
+    constants::{self, Attributes, Entities},
     models::{entities, spaces, triples},
     sink_actions::{ActionDependencies, SinkAction},
     triples::ValueType,
@@ -214,7 +214,7 @@ impl ActionDependencies for TableAction {
                 entity_id: value.id().into(),
                 type_id: Entities::Attribute.id().into(),
             })]),
-            TableAction::SpaceCreated { .. } => None,
+            TableAction::SpaceCreated { entity_id, .. } => Some(vec![SinkAction::General(GeneralAction::EntityCreated { space: "".into(), entity_id: entity_id.into() , author: "".into() })]),
             TableAction::ValueTypeAdded { value_type, .. } => None,
         }
     }
@@ -255,6 +255,7 @@ impl ActionDependencies for TableAction {
                 type_id,
             } => {
                 Some(vec![
+                    SinkAction::General(GeneralAction::EntityCreated { space: space.clone(), entity_id: entity_id.clone(), author: "".into() }),
                     // Make the type_id a type
                     SinkAction::Table(TableAction::TypeAdded {
                         space: space.clone(),
@@ -263,6 +264,7 @@ impl ActionDependencies for TableAction {
                     }),
                 ])
             }
+
             TableAction::AttributeAdded {
                 space,
                 entity_id,
