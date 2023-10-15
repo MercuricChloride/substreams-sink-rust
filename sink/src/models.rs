@@ -17,15 +17,19 @@ END $$;
                     )
 }
 
-
+pub fn triple_exists_string(entity: &str, attribute: &str, value: &str) -> String {
+    format!("SELECT EXISTS(SELECT * from \"public\".\"triples\" WHERE \"entity_id\" = '{entity}' AND \"attribute_id\" = '{attribute}' AND \"value_id\" = '{value}');")
+}
 
 pub mod spaces {
     use entity::spaces::*;
     use migration::{DbErr, OnConflict};
-    use sea_orm::{ActiveValue, ConnectionTrait, DbBackend, EntityTrait, Statement};
+    use sea_orm::{
+        ActiveValue, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, Statement,
+    };
 
     pub async fn create_schema(
-        db: &impl ConnectionTrait,
+        db: &DatabaseTransaction,
         schema_name: &String,
     ) -> Result<(), DbErr> {
         let schema_query = format!("CREATE SCHEMA IF NOT EXISTS \"{schema_name}\";");
@@ -37,7 +41,7 @@ pub mod spaces {
     }
 
     pub async fn create(
-        db: &impl ConnectionTrait,
+        db: &DatabaseTransaction,
         space_id: String,
         address: String,
         created_in_space: String,
@@ -85,19 +89,32 @@ pub mod spaces {
             .await?;
         Ok(())
     }
+
+    pub async fn exists(db: &DatabaseTransaction, space: String) -> Result<bool, DbErr> {
+        let space = Entity::find_by_id(space).one(db).await?;
+        Ok(space.is_some())
+    }
 }
 
 pub mod entities {
     use anyhow::Error;
     use entity::{entities::*, entity_attributes, entity_types};
     use migration::{DbErr, OnConflict};
-    use sea_orm::{ActiveValue, ConnectionTrait, DbBackend, EntityTrait, Statement};
+    use sea_orm::{
+        ActiveValue, ConnectionTrait, DatabaseTransaction, DbBackend, EntityTrait, IsolationLevel,
+        Statement, TransactionTrait,
+    };
 
-    use crate::triples::ValueType;
+    use crate::{constants, triples::ValueType};
 
     use super::table_comment_string;
 
-    pub async fn create_table(db: &impl ConnectionTrait, entity_id: &String) -> Result<(), Error> {
+    pub async fn exists(db: &DatabaseTransaction, entity_id: String) -> Result<bool, DbErr> {
+        let entity = Entity::find_by_id(entity_id).one(db).await?;
+        Ok(entity.is_some())
+    }
+
+    pub async fn create_table(db: &DatabaseTransaction, entity_id: &String) -> Result<(), Error> {
         println!("Creating table for entity {}", entity_id);
 
         let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
@@ -178,15 +195,26 @@ pub mod entities {
     /// Because of the way postgraphile works, we need to add the column, with a reference, to the attribute's table
     /// prefixed with "parent_", and a reference to the entity's table, which is the entity-id
     pub async fn add_relation(
-        db: &impl ConnectionTrait,
+        db: &DatabaseTransaction,
         parent_entity_id: &String,
         attribute_id: &String,
         value: &ValueType,
         space: &String,
     ) -> Result<(), Error> {
-        let is_relation = match &value {
-            ValueType::Entity { id } => true,
-            _ => false,
+        let value_entity = Entity::find_by_id(value.id()).one(db).await?;
+
+        let is_relation = if let Some(value_entity) = value_entity {
+            if let Some(value_type) = value_entity.value_type {
+                if value_type == constants::Entities::Relation.id() {
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
         };
 
         if is_relation {
@@ -197,7 +225,7 @@ pub mod entities {
             );
 
             // grab the entity of the child
-            let child_entity = Entity::find_by_id(child_entity_id.clone()).one(db).await?;
+            let child_entity = Entity::find_by_id(child_entity_id).one(db).await?;
 
             if let None = child_entity {
                 return Err(Error::msg(format!(
@@ -221,17 +249,16 @@ pub mod entities {
             let parent_space = parent_entity.defined_in;
 
             // check if the table exists
-
             let child_table_exists_statement = format!(
-                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{space}' AND table_name = '{entity}');",
-                space = child_space,
-                entity = child_entity.id
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{foo}' AND table_name = '{entity}');",
+                foo = child_space,
+                entity = child_entity_id
             );
 
             let parent_table_exists_statement = format!(
-                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{space}' AND table_name = '{entity}');",
-                space = parent_space,
-                entity = parent_entity.id
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = '{foo}' AND table_name = '{entity}');",
+                foo = parent_space,
+                entity = parent_entity_id
             );
 
             let child_table_result = db
@@ -253,43 +280,54 @@ pub mod entities {
             {
                 let child_table_exists: bool = child_table.try_get_by_index(0 as usize).unwrap();
 
+                let txn = db.begin().await?;
                 if !child_table_exists {
-                    create_table(db, &child_entity.id).await?;
+                    create_table(&txn, &child_entity.id).await?;
                 }
+                txn.commit().await?;
 
                 let parent_table_exists: bool = parent_table.try_get_by_index(0 as usize).unwrap();
 
+                let txn = db.begin().await?;
                 if !parent_table_exists {
-                    create_table(db, &parent_entity.id).await?;
+                    create_table(&txn, &parent_entity.id).await?;
                 }
+                txn.commit().await?;
 
                 let column_add_statement = format!(
                     "ALTER TABLE \"{child_space}\".\"{child_entity}\" ADD COLUMN IF NOT EXISTS \"parent_{parent_entity}\" TEXT REFERENCES \"{parent_space}\".\"{parent_entity}\"(id);",
                     child_space = child_space,
-                    child_entity = child_entity.id,
+                    child_entity = child_entity_id,
                     parent_space = parent_space,
-                    parent_entity = parent_entity.id
+                    parent_entity = parent_entity_id
                 );
 
-                db.execute(Statement::from_string(
+                let txn = db.begin().await?;
+                txn.execute(Statement::from_string(
                     DbBackend::Postgres,
                     column_add_statement,
                 ))
                 .await?;
+                txn.commit().await?;
 
-                let column_name_statement = format!(
-                    "COMMENT ON COLUMN \"{space}\".\"{child_entity}\".\"parent_{parent_entity}\" IS E'@name {parent_name}';",
-                    space = space,
-                    child_entity = child_entity.id,
-                    parent_entity = parent_entity.id,
-                    parent_name = parent_entity.name.unwrap_or(parent_entity_id.to_string())
-                );
+                if let Some(parent_entity_name) = parent_entity.name {
+                    let txn = db.begin().await?;
+                    let column_name_statement = format!(
+                        "COMMENT ON COLUMN \"{child_space}\".\"{child_entity}\".\"parent_{parent_entity}\" IS E'@name {parent_name}';",
+                        child_space = child_space,
+                        child_entity = child_entity_id,
+                        parent_entity = parent_entity_id,
+                        parent_name = parent_entity_name,
+                    );
 
-                db.execute(Statement::from_string(
-                    DbBackend::Postgres,
-                    column_name_statement
-                ))
-                .await?;
+                    txn.execute(Statement::from_string(
+                        DbBackend::Postgres,
+                        column_name_statement,
+                    ))
+                    .await?;
+
+                    txn.commit().await?
+                }
             } else {
                 panic!("DOESN'T EXIST");
             }
@@ -304,13 +342,13 @@ pub mod entities {
             }
             let attribute = attribute.unwrap();
 
-            let attribute_name = attribute.name.unwrap_or(attribute.id);
+            let attribute_name = attribute.name.unwrap_or(attribute.id.clone());
             // otherwise we just need to add a column with text
             let column_add_statement = format!(
-                "ALTER TABLE \"{space}\".\"{entity}\" ADD COLUMN IF NOT EXISTS \"{attribute}\" TEXT;",
+                "ALTER TABLE \"{space}\".\"{entity}\" ADD COLUMN IF NOT EXISTS \"parent_{attribute}\" TEXT;",
                 space = space,
                 entity = parent_entity_id,
-                attribute = attribute_name
+                attribute = attribute.id
             );
 
             db.execute(Statement::from_string(
@@ -319,19 +357,19 @@ pub mod entities {
             ))
             .await?;
             let column_name_statement = format!(
-                "COMMENT ON COLUMN \"{space}\".\"{entity}\".\"{attribute}\" IS E'@name {attribute}';",
+                "COMMENT ON COLUMN \"{space}\".\"{entity}\".\"parent_{attribute_id}\" IS E'@name {attribute_name}';",
                 space = space,
                 entity = parent_entity_id,
-                attribute = attribute_name,
+                attribute_id = attribute_id,
+                attribute_name = attribute_name,
             );
 
             db.execute(Statement::from_string(
                 DbBackend::Postgres,
-                column_name_statement
+                column_name_statement,
             ))
             .await?;
         }
-
 
         Ok(())
     }
@@ -364,7 +402,7 @@ pub mod entities {
 
         if space_queries {
             // grab the space the type is defined in
-            let space = Entity::find_by_id(type_id.clone())
+            let type_space = Entity::find_by_id(type_id.clone())
                 .one(db)
                 .await?
                 .unwrap()
@@ -375,18 +413,17 @@ pub mod entities {
                 type_id, entity_id, space
             );
 
-            let type_insert_statement = format!(
-            "INSERT INTO \"{space}\".\"{type_id}\" (\"id\", \"entity_id\") VALUES ('{entity_id}', '{entity_id}') ON CONFLICT (id) DO NOTHING;",
-            space = space,
-            type_id = type_id,
-            entity_id = entity_id
-        );
+            if !type_space.is_empty() && !type_id.is_empty() && !entity_id.is_empty() {
+                let type_insert_statement = format!(
+                "INSERT INTO \"{type_space}\".\"{type_id}\" (\"id\", \"entity_id\") VALUES ('{entity_id}', '{entity_id}') ON CONFLICT (id) DO NOTHING;",
+                );
 
-            db.execute(Statement::from_string(
-                DbBackend::Postgres,
-                type_insert_statement,
-            ))
-            .await?;
+                db.execute(Statement::from_string(
+                    DbBackend::Postgres,
+                    type_insert_statement,
+                ))
+                .await?;
+            }
         }
 
         Ok(())
@@ -422,7 +459,9 @@ pub mod entities {
         let entity = Entity::find_by_id(entity_id.clone()).one(db).await?;
 
         if let None = entity {
-            return Err(Error::msg("Couldn't add value type as entity doesn't exist"));
+            return Err(Error::msg(
+                "Couldn't add value type as entity doesn't exist",
+            ));
         }
 
         let entity = entity.unwrap();
@@ -497,10 +536,9 @@ pub mod entities {
                 WHERE column_name = 'parent_{entity_id}';",
             );
 
-            let tables = db.query_all(Statement::from_string(
-                DbBackend::Postgres,
-                tables_query,
-            )).await?;
+            let tables = db
+                .query_all(Statement::from_string(DbBackend::Postgres, tables_query))
+                .await?;
 
             for table in tables {
                 let table_name: String = table.try_get_by_index(0 as usize).unwrap();
@@ -514,11 +552,10 @@ pub mod entities {
 
                 db.execute(Statement::from_string(
                     DbBackend::Postgres,
-                    column_name_statement
+                    column_name_statement,
                 ))
                 .await?;
             }
-
         }
 
         Ok(())
@@ -706,16 +743,18 @@ pub mod triples {
     use migration::{DbErr, OnConflict};
     use sea_orm::{
         ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection,
-        EntityTrait, QueryFilter, Set,
+        DatabaseTransaction, DbBackend, EntityTrait, QueryFilter, Set, Statement,
     };
     use sea_query::RcOrArc;
     use uuid::Uuid;
 
     use crate::{
         constants::{Attributes, Entities, ROOT_SPACE_ADDRESS},
-        models::entities::{upsert_is_type, self},
+        models::entities::{self, upsert_is_type},
         triples::{ActionTriple, ValueType},
     };
+
+    use super::triple_exists_string;
 
     pub async fn create(
         db: &impl ConnectionTrait,
@@ -726,9 +765,9 @@ pub mod triples {
         author: String,
     ) -> Result<(), DbErr> {
         // create the entity and attribute and value if they don't exist
-        super::entities::create(db, entity_id.clone(), space.clone()).await?;
+        //super::entities::create(db, entity_id.clone(), space.clone()).await?;
 
-        super::entities::create(db, attribute_id.clone(), space.clone()).await?;
+        //super::entities::create(db, attribute_id.clone(), space.clone()).await?;
 
         let id = format!("{}", Uuid::new_v4());
 
@@ -778,7 +817,7 @@ pub mod triples {
     }
 
     pub async fn delete(
-        db: &impl ConnectionTrait,
+        db: &DatabaseTransaction,
         entity_id: String,
         attribute_id: String,
         value: ValueType,
@@ -800,7 +839,7 @@ pub mod triples {
         Ok(())
     }
 
-    pub async fn bootstrap(db: &DatabaseConnection) -> Result<(), Error> {
+    pub async fn bootstrap(db: &DatabaseTransaction) -> Result<(), Error> {
         use strum::IntoEnumIterator;
         let author = "BOOTSTRAP";
 
@@ -961,6 +1000,26 @@ pub mod triples {
         }
 
         Ok(())
+    }
+
+    pub async fn exists(
+        db: &DatabaseTransaction,
+        entity_id: &str,
+        attribute_id: &str,
+        value_id: &str,
+    ) -> Result<bool, Error> {
+        let query_string = triple_exists_string(entity_id, attribute_id, value_id);
+
+        let result = db
+            .query_one(Statement::from_string(DbBackend::Postgres, query_string))
+            .await?;
+
+        if let Some(result) = result {
+            let exists: bool = result.try_get_by_index(0 as usize).unwrap();
+            return Ok(exists);
+        } else {
+            return Ok(false);
+        }
     }
 }
 

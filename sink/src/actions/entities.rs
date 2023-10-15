@@ -1,9 +1,14 @@
 use anyhow::Error;
 use sea_orm::ConnectionTrait;
 
-use crate::models::entities;
+use crate::{
+    models::entities,
+    sink_actions::{ActionDependencies, SinkAction, SinkActionDependencies as Dep},
+};
 
-#[derive(Debug, Clone)]
+use super::general::GeneralAction;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EntityAction {
     /// Avatars can be added to users
     AvatarAdded {
@@ -60,5 +65,95 @@ impl EntityAction {
         };
 
         Ok(())
+    }
+}
+
+impl ActionDependencies for EntityAction {
+    fn dependencies(&self) -> Option<Vec<SinkAction>> {
+        match self {
+            EntityAction::AvatarAdded {
+                space,
+                entity_id,
+                avatar_image,
+            } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
+                space: "".into(),
+                entity_id: entity_id.into(),
+                author: "".into(),
+            })]),
+            EntityAction::NameAdded {
+                space,
+                entity_id,
+                name,
+            } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
+                space: "".into(),
+                entity_id: entity_id.into(),
+                author: "".into(),
+            })]),
+            EntityAction::DescriptionAdded {
+                space,
+                entity_id,
+                description,
+            } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
+                space: "".into(),
+                entity_id: entity_id.into(),
+                author: "".into(),
+            })]),
+        }
+    }
+
+    fn has_fallback(&self) -> bool {
+        match self {
+            EntityAction::AvatarAdded {
+                space,
+                entity_id,
+                avatar_image,
+            } => false,
+            EntityAction::NameAdded {
+                space,
+                entity_id,
+                name,
+            } => false,
+            EntityAction::DescriptionAdded {
+                space,
+                entity_id,
+                description,
+            } => false,
+        }
+    }
+
+    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction>> {
+        todo!()
+    }
+
+    fn as_dep(&self) -> SinkAction {
+        match self {
+            EntityAction::AvatarAdded {
+                space,
+                entity_id,
+                avatar_image,
+            } => SinkAction::Entity(EntityAction::AvatarAdded {
+                space: "".into(),
+                entity_id: entity_id.clone(),
+                avatar_image: avatar_image.clone(),
+            }),
+            EntityAction::NameAdded {
+                space,
+                entity_id,
+                name,
+            } => SinkAction::Entity(EntityAction::NameAdded {
+                space: "".into(),
+                entity_id: entity_id.clone(),
+                name: name.clone(),
+            }),
+            EntityAction::DescriptionAdded {
+                space,
+                entity_id,
+                description,
+            } => SinkAction::Entity(EntityAction::DescriptionAdded {
+                space: "".into(),
+                entity_id: entity_id.clone(),
+                description: description.clone(),
+            }),
+        }
     }
 }

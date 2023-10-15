@@ -1,9 +1,14 @@
 use anyhow::Error;
 use sea_orm::ConnectionTrait;
 
-use crate::models::spaces::upsert_cover;
+use crate::{
+    models::spaces::upsert_cover,
+    sink_actions::{ActionDependencies, SinkAction},
+};
 
-#[derive(Debug, Clone)]
+use super::tables::TableAction;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SpaceAction {
     /// Covers can be added to spaces, this is the cover image for the webpage
     CoverAdded {
@@ -43,5 +48,106 @@ impl SpaceAction {
         };
 
         Ok(())
+    }
+}
+
+impl ActionDependencies for SpaceAction {
+    fn dependencies(&self) -> Option<Vec<SinkAction>> {
+        match self {
+            SpaceAction::CoverAdded {
+                space,
+                entity_id,
+                cover_image,
+            } => Some(vec![SinkAction::Table(TableAction::SpaceCreated {
+                entity_id: entity_id.into(),
+                space: "".to_string(),
+                created_in_space: "".to_string(),
+                author: "".into(),
+            })]),
+            SpaceAction::SubspaceAdded {
+                parent_space,
+                child_space,
+            } => Some(vec![
+                SinkAction::Table(TableAction::SpaceCreated {
+                    entity_id: parent_space.into(),
+                    space: "".to_string(),
+                    created_in_space: "".to_string(),
+                    author: "".into(),
+                }),
+                SinkAction::Table(TableAction::SpaceCreated {
+                    entity_id: child_space.into(),
+                    space: "".to_string(),
+                    created_in_space: "".to_string(),
+                    author: "".into(),
+                }),
+            ]),
+            SpaceAction::SubspaceRemoved {
+                parent_space,
+                child_space,
+            } => Some(vec![
+                SinkAction::Table(TableAction::SpaceCreated {
+                    entity_id: parent_space.into(),
+                    space: "".to_string(),
+                    created_in_space: "".to_string(),
+                    author: "".into(),
+                }),
+                SinkAction::Table(TableAction::SpaceCreated {
+                    entity_id: child_space.into(),
+                    space: "".to_string(),
+                    created_in_space: "".to_string(),
+                    author: "".into(),
+                }),
+            ]),
+        }
+    }
+
+    fn has_fallback(&self) -> bool {
+        match self {
+            SpaceAction::CoverAdded {
+                space,
+                entity_id,
+                cover_image,
+            } => false,
+            SpaceAction::SubspaceAdded {
+                parent_space,
+                child_space,
+            } => false,
+            SpaceAction::SubspaceRemoved {
+                parent_space,
+                child_space,
+            } => false,
+        }
+    }
+
+    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction>> {
+        todo!()
+    }
+
+    fn as_dep(&self) -> SinkAction {
+        match self {
+            SpaceAction::CoverAdded {
+                space,
+                entity_id,
+                cover_image,
+            } => SinkAction::Space(SpaceAction::CoverAdded {
+                space: space.clone(),
+                entity_id: entity_id.clone(),
+                cover_image: cover_image.clone(),
+            }),
+            SpaceAction::SubspaceAdded {
+                parent_space,
+                child_space,
+            } => SinkAction::Space(SpaceAction::SubspaceAdded {
+                parent_space: parent_space.clone(),
+                child_space: child_space.clone(),
+            }),
+            SpaceAction::SubspaceRemoved {
+                parent_space,
+                child_space,
+            } => SinkAction::Space(SpaceAction::SubspaceRemoved {
+                parent_space: parent_space.clone(),
+                child_space: child_space.clone(),
+            }),
+        }
     }
 }

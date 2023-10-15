@@ -3,14 +3,21 @@ use crate::actions::general::GeneralAction;
 use crate::actions::spaces::SpaceAction;
 use crate::actions::tables::TableAction;
 use crate::constants;
+use crate::constants::Attributes;
+use crate::constants::Entities;
+use crate::models;
 use crate::models::*;
+use crate::triples::ActionTriple;
 use crate::triples::ValueType;
 use anyhow::Error;
 use futures03::{future::try_join_all, stream::FuturesOrdered};
 use migration::DbErr;
+use sea_orm::ColumnTrait;
 use sea_orm::ConnectionTrait;
 use sea_orm::DatabaseConnection;
 use sea_orm::DatabaseTransaction;
+use sea_orm::EntityTrait;
+use sea_orm::QueryFilter;
 use sea_orm::TransactionTrait;
 use strum::EnumIter;
 use tokio_stream::StreamExt;
@@ -28,12 +35,267 @@ use tokio_stream::StreamExt;
 ///
 /// The reason for this is just so we can keep track of what actions we have taken in the database.
 /// In addition to specific actions that should do special things, which are the rest of the variants.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum SinkAction {
     Table(TableAction),
     Space(SpaceAction),
     Entity(EntityAction),
     General(GeneralAction),
+}
+
+/// This enum represents the different dependencies that a sink action can have.
+/// For example, if an entity is given a "types" of "person", that "person" entity needs
+/// to have a "types" of "type", otherwise the graph will be inconsistent.
+#[derive(PartialEq, Debug, Eq, Hash, Clone)]
+pub enum SinkActionDependencies<'a> {
+    /// Indicates this action requires a type entity to be created
+    IsType { type_id: &'a str },
+
+    /// Indicates this action requries something to have an "types" of "Attribute"
+    IsAttribute { entity_id: &'a str },
+
+    /// Indicates entity_id must be a space
+    IsSpace { entity_id: &'a str },
+
+    /// Indicates the entity_id must exist
+    Exists { entity_id: &'a str },
+
+    /// Indicates the value_type of the attribute must be the given value_type
+    ValueTypeMatches {
+        attribute_id: &'a str,
+        value_type: &'a str,
+    },
+}
+
+impl SinkActionDependencies<'_> {
+    /// This function takes in a sink action and returns the kind of dependency it satisfies if any
+    pub fn from_action(action: &SinkAction) -> Option<Vec<SinkActionDependencies>> {
+        match action {
+            SinkAction::Table(table) => {
+                if let TableAction::TypeAdded {
+                    type_id,
+                    space,
+                    entity_id,
+                } = table
+                {
+                    if type_id == Entities::SchemaType.id() {
+                        return Some(vec![SinkActionDependencies::IsType { type_id }]);
+                    }
+
+                    if type_id == Entities::Attribute.id() {
+                        return Some(vec![SinkActionDependencies::IsAttribute { entity_id }]);
+                    }
+                }
+
+                if let TableAction::SpaceCreated {
+                    entity_id,
+                    space,
+                    created_in_space,
+                    author,
+                } = table
+                {
+                    return Some(vec![SinkActionDependencies::IsSpace { entity_id }]);
+                }
+
+                if let TableAction::ValueTypeAdded {
+                    entity_id,
+                    value_type,
+                    ..
+                } = table
+                {
+                    return Some(vec![SinkActionDependencies::ValueTypeMatches {
+                        attribute_id: entity_id,
+                        value_type,
+                    }]);
+                }
+            }
+            // SinkAction::General(general) => {
+            //if let GeneralAction::TripleAdded { space, entity_id, attribute_id, value, author } = general {
+            //return Some(vec![SinkActionDependencies::Exists { entity_id }, SinkActionDependencies::Exists { entity_id: attribute_id }]);
+            //}
+            // TODO Add attribute exists?
+            // Not sure I need this
+            // }
+            _ => {}
+        };
+        None
+    }
+
+    pub fn match_action<'a>(&'a self, action: &'a SinkAction) -> Option<&SinkAction> {
+        match self {
+            SinkActionDependencies::IsType { type_id: entity } => {
+                if let SinkAction::Table(table) = action {
+                    if let TableAction::TypeAdded {
+                        type_id,
+                        space,
+                        entity_id,
+                    } = table
+                    {
+                        if entity_id == entity && type_id == Entities::SchemaType.id() {
+                            return Some(action);
+                        }
+                    }
+                }
+            }
+            SinkActionDependencies::IsAttribute { entity_id: entity } => {
+                if let SinkAction::Table(table) = action {
+                    if let TableAction::TypeAdded {
+                        type_id,
+                        space,
+                        entity_id,
+                    } = table
+                    {
+                        if entity_id == entity && type_id == Entities::Attribute.id() {
+                            return Some(action);
+                        }
+                    }
+                }
+            }
+            SinkActionDependencies::IsSpace {
+                entity_id: space_id,
+            } => {
+                if let SinkAction::Table(table) = action {
+                    if let TableAction::SpaceCreated {
+                        entity_id,
+                        space,
+                        created_in_space,
+                        author,
+                    } = table
+                    {
+                        if space_id == entity_id {
+                            return Some(action);
+                        }
+                    }
+                }
+            }
+            SinkActionDependencies::Exists { entity_id } => {
+                if let SinkAction::General(general) = action {
+                    match general {
+                        GeneralAction::EntityCreated {
+                            space,
+                            entity_id,
+                            author,
+                        } => {
+                            if entity_id == entity_id {
+                                return Some(action);
+                            }
+                        }
+                        GeneralAction::TripleAdded {
+                            space,
+                            entity_id,
+                            attribute_id,
+                            value,
+                            author,
+                        } => {
+                            if entity_id == entity_id
+                                || attribute_id == entity_id
+                                || value.id() == entity_id
+                            {
+                                return Some(action);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        };
+        None
+    }
+
+    pub async fn check_db(&self, db: &DatabaseTransaction) -> bool {
+        use entity::entities;
+        use entity::entity_types;
+        use entity::spaces;
+        match self {
+            SinkActionDependencies::IsType { type_id: entity } => {
+                let entity = entities::Entity::find_by_id(*entity).one(db).await.unwrap();
+                if entity.is_none() {
+                    return false;
+                }
+            }
+            SinkActionDependencies::IsAttribute { entity_id: entity } => {
+                let ent = entity_types::Entity::find()
+                    .filter(entity_types::Column::EntityId.contains(*entity))
+                    .one(db)
+                    .await
+                    .unwrap();
+                if ent.is_none() {
+                    return false;
+                }
+            }
+            SinkActionDependencies::IsSpace {
+                entity_id: space_id,
+            } => {
+                let space = spaces::Entity::find_by_id(*space_id).one(db).await.unwrap();
+                if space.is_none() {
+                    return false;
+                }
+            }
+            SinkActionDependencies::Exists { entity_id } => {
+                let entity = entities::Entity::find_by_id(*entity_id)
+                    .one(db)
+                    .await
+                    .unwrap();
+                if entity.is_none() {
+                    return false;
+                }
+            }
+            _ => {}
+        };
+        true
+    }
+}
+
+pub trait ActionDependencies {
+    /// This function should return the dependencies of this action
+    fn dependencies(&self) -> Option<Vec<SinkAction>>;
+    /// If this action has a fallback, this function should return true
+    fn has_fallback(&self) -> bool;
+    /// If this action has a fallback, this function should return the fallback actions
+    /// to mend the graph. These should always succeed
+    fn fallback(&self) -> Option<Vec<SinkAction>>;
+    /// This function is used to return a sink action, as a "dependency node"
+    /// Which is just a sink action, without an author or space.
+    fn as_dep(&self) -> SinkAction;
+}
+
+impl ActionDependencies for SinkAction {
+    fn dependencies(&self) -> Option<Vec<SinkAction>> {
+        match self {
+            SinkAction::Table(table) => table.dependencies(),
+            SinkAction::Space(space) => space.dependencies(),
+            SinkAction::Entity(entity) => entity.dependencies(),
+            SinkAction::General(general) => general.dependencies(),
+        }
+    }
+
+    fn has_fallback(&self) -> bool {
+        match self {
+            SinkAction::Table(table) => table.has_fallback(),
+            SinkAction::Space(space) => space.has_fallback(),
+            SinkAction::Entity(entity) => entity.has_fallback(),
+            SinkAction::General(general) => general.has_fallback(),
+        }
+    }
+
+    fn fallback(&self) -> Option<Vec<SinkAction>> {
+        match self {
+            SinkAction::Table(table) => table.fallback(),
+            SinkAction::Space(space) => space.fallback(),
+            SinkAction::Entity(entity) => entity.fallback(),
+            SinkAction::General(general) => general.fallback(),
+        }
+    }
+
+    fn as_dep(&self) -> SinkAction {
+        match self {
+            SinkAction::Table(table) => table.as_dep(),
+            SinkAction::Space(space) => space.as_dep(),
+            SinkAction::Entity(entity) => entity.as_dep(),
+            SinkAction::General(general) => general.as_dep(),
+        }
+    }
 }
 
 pub async fn handle_sink_actions(
@@ -68,7 +330,7 @@ pub async fn handle_sink_actions(
 impl SinkAction {
     pub async fn execute(
         &self,
-        db: &impl ConnectionTrait,
+        db: &DatabaseTransaction,
         space_queries: bool,
     ) -> Result<(), Error> {
         match self {
@@ -76,6 +338,14 @@ impl SinkAction {
             SinkAction::Entity(action) => action.execute(db, space_queries).await,
             SinkAction::General(action) => action.execute(db).await,
             SinkAction::Space(action) => action.execute(db).await,
+        }
+    }
+
+    pub async fn check_if_exists(&self, db: &DatabaseTransaction) -> Result<bool, Error> {
+        match self {
+            SinkAction::Table(action) => action.check_if_exists(db).await,
+            SinkAction::General(action) => action.check_if_exists(db).await,
+            _ => todo!("check_if_exists for sink actions other than table or general actions"),
         }
     }
 
@@ -99,7 +369,31 @@ impl SinkAction {
             SinkAction::General(_) => 1,
             SinkAction::Entity(_) => 2,
             SinkAction::Space(_) => 3,
-            SinkAction::Table(_) => 4,
+            SinkAction::Table(action) => match action {
+                TableAction::SpaceCreated {
+                    entity_id,
+                    space,
+                    created_in_space,
+                    author,
+                } => 5,
+                TableAction::TypeAdded {
+                    space,
+                    entity_id,
+                    type_id,
+                } => 6,
+                TableAction::ValueTypeAdded {
+                    space,
+                    entity_id,
+                    attribute_id,
+                    value_type,
+                } => 7,
+                TableAction::AttributeAdded {
+                    space,
+                    entity_id,
+                    attribute_id,
+                    value,
+                } => 8,
+            },
         }
     }
 }

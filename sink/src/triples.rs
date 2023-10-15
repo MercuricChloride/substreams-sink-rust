@@ -351,7 +351,20 @@ impl ActionTriple {
                 attribute_id,
                 value,
                 ..
-            } => entity_id.is_empty() || attribute_id.is_empty() || value.id().is_empty(),
+            } => {
+                let is_empty_string = match value {
+                    ValueType::Number { id, value } => value.to_string().is_empty(),
+                    ValueType::String { id, value } => value.to_string().is_empty(),
+                    ValueType::Image { id, value } => value.to_string().is_empty(),
+                    ValueType::Date { id, value } => value.to_string().is_empty(),
+                    ValueType::Url { id, value } => value.to_string().is_empty(),
+                    _ => false,
+                };
+                entity_id.is_empty()
+                    || attribute_id.is_empty()
+                    || value.id().is_empty()
+                    || is_empty_string
+            }
             ActionTriple::DeleteTriple {
                 entity_id,
                 attribute_id,
@@ -475,7 +488,7 @@ impl ActionTriple {
                 value,
                 entity_id,
                 space,
-                ..
+                author,
             } if attribute_id.starts_with(Attributes::Space.id()) => {
                 // if the attribute id is space, and the value is a string, then we have created a space.
                 if let ValueType::String { id: _, value } = value {
@@ -483,6 +496,7 @@ impl ActionTriple {
                         entity_id: entity_id.to_string(),
                         space: value.clone(),
                         created_in_space: space.clone(),
+                        author: author.clone(),
                     }))
                 } else {
                     None
@@ -681,14 +695,14 @@ impl ActionTriple {
 }
 
 /// This represents the value type of a triple. IE The final part of a triple. (Entity, Attribute, _Value_)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueType {
     /// The number value
     Number {
         /// The uuid of this specific number
         id: String,
         /// The value of the number
-        value: f64,
+        value: i64,
     },
     /// The string value
     String {
@@ -786,7 +800,7 @@ impl<'de> Deserialize<'de> for ValueType {
         match val.get("type").and_then(Value::as_str) {
             Some("number") => Ok(ValueType::Number {
                 id: val["id"].as_str().unwrap().to_string(),
-                value: val["value"].as_f64().unwrap(),
+                value: val["value"].as_i64().unwrap(),
             }),
             Some("string") => Ok(ValueType::String {
                 id: val["id"].as_str().unwrap().to_string(),
