@@ -290,40 +290,6 @@ async fn try_action<'a>(
     while let Some(action) = actions.pop_front() {
         if let Some(_) = action.dependencies() {
             waiting_queue.push_back(action);
-            // if action.has_fallback() {
-            //     let flat_dependencies: Vec<_> = dependencies
-            //         .iter()
-            //         .flat_map(|dep| dep.fallback_actions(author, space).unwrap_or(vec![]))
-            //         .collect();
-
-            //     for action in flat_dependencies {
-            //         let move_action = action.clone();
-            //         let sub_txn = first_txn.begin().await?;
-            //         second_actions.push(async move {
-            //             move_action.execute(&sub_txn, use_space_queries).await.unwrap();
-            //             sub_txn.commit().await.unwrap();
-            //         })
-            //     }
-            // } else {
-            //     let sub_txn = first_txn.begin().await.unwrap();
-            //     let move_action = action.clone();
-            //     third_actions.push(async move {
-            //         // for dep in dependencies {
-            //         //     if !dep.met(&mut dependency_nodes, &first_txn).await.unwrap() {
-            //         //         //println!("Dependency {:?} not met for action: {:?}", dep, action);
-            //         //         dependencies_met = false;
-            //         //     }
-            //         // }
-
-            //         if dependencies_met {
-            //             move_action.execute(&sub_txn, use_space_queries).await.unwrap();
-            //         } else {
-            //             println!("Missing dependences for action {action:?}");
-            //         }
-
-            //         sub_txn.commit().await.unwrap();
-            //     })
-            // }
         } else {
             // if something doesn't have dependencies, we can push it directly to the first_actions queue
             let sub_tx = first_txn.begin().await?;
@@ -336,54 +302,6 @@ async fn try_action<'a>(
                 sub_tx.commit().await
             });
         }
-
-        //     // this block will only contain things that have dependencies that have been met
-        //     if dependencies_met {
-        //         println!("\nExecuting og action: {:?}", action);
-
-        //         let sub_tx = first_txn.begin().await?;
-        //         let move_action = action.clone();
-        //         first_actions.push(async move {
-        //             move_action
-        //                 .execute(&sub_tx, use_space_queries)
-        //                 .await
-        //                 .unwrap();
-        //             sub_tx.commit().await
-        //         });
-
-        //         if let Some(as_dep) = SinkActionDependency::match_action(&action) {
-        //             dependency_nodes.insert(as_dep, true);
-
-        //             // Create a list of actions that were dependent on the action we just executed
-        //             let mut dependent_actions = Vec::new();
-        //             dependency_edges = dependency_edges
-        //                 .into_iter()
-        //                 .filter(|(action, dep)| {
-        //                     if dep == &as_dep {
-        //                         dependent_actions.push(action.clone());
-        //                         false
-        //                     } else {
-        //                         true
-        //                     }
-        //                 })
-        //                 .collect();
-
-        //             for action in dependent_actions {
-        //                 // if we can't find the action in the dependency edges, we can add it to the waiting queue
-        //                 // otherwise, it still has dependencies that need to be met
-        //                 if dependency_edges
-        //                     .iter()
-        //                     .find(|(a, _)| *a == action)
-        //                     .is_none()
-        //                 {
-        //                     waiting_queue.push_back(action);
-        //                 }
-        //             }
-        //         }
-        //     } else {
-        //         waiting_queue.push_back(action.clone());
-        //     }
-        // }
     }
 
     while let Some(result) = first_actions.next().await {
@@ -410,7 +328,12 @@ async fn try_action<'a>(
                     .collect();
 
                 for action in flat_dependencies {
-                    action.execute(&first_txn, use_space_queries).await?;
+                    let cloned = action.clone();
+                    cloned.execute(&first_txn, use_space_queries).await?;
+
+                    // if let Some(as_dep) = SinkActionDependency::match_action(&action) {
+                    //     dependency_nodes.insert(as_dep, true);
+                    // }
                 }
             }
         } else {
@@ -418,7 +341,7 @@ async fn try_action<'a>(
                 // handle the dependencies
                 for dep in dependencies {
                     if !dep.met(&mut dependency_nodes, &first_txn).await? {
-                        //println!("Dependency {:?} not met for action: {:?}", dep, action);
+                        // println!("Dependency {:?} not met for action: {:?}", dep, action);
                         dependencies_met = false;
                     }
                 }
@@ -644,7 +567,7 @@ mod tests {
 
         dotenv().ok();
 
-        let max_connections = 999;
+        let max_connections = 199;
         let database_url = std::env::var("DATABASE_URL").unwrap();
 
         let mut connection_options = ConnectOptions::new(database_url);

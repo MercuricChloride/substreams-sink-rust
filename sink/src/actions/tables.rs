@@ -158,11 +158,18 @@ impl TableAction<'_> {
 impl<'a> ActionDependencies<'a> for TableAction<'a> {
     fn dependencies(&self) -> Option<Vec<SinkActionDependency<'a>>> {
         match self {
-            TableAction::TypeAdded { type_id, space, .. } => {
+            TableAction::TypeAdded {
+                type_id,
+                space,
+                entity_id,
+            } => {
                 if *type_id != Entities::SchemaType.id() {
-                    Some(vec![SinkActionDependency::IsType { type_id }])
+                    Some(vec![
+                        SinkActionDependency::IsType { type_id: entity_id },
+                        SinkActionDependency::IsType { type_id },
+                    ])
                 } else {
-                    None
+                    Some(vec![SinkActionDependency::IsType { type_id }])
                 }
             }
             TableAction::AttributeAdded {
@@ -178,7 +185,20 @@ impl<'a> ActionDependencies<'a> for TableAction<'a> {
             TableAction::SpaceCreated { entity_id, .. } => {
                 Some(vec![SinkActionDependency::Exists { entity_id }])
             }
-            TableAction::ValueTypeAdded { value_type, .. } => None,
+            TableAction::ValueTypeAdded {
+                space,
+                entity_id,
+                attribute_id,
+                value_type,
+            } => Some(vec![
+                SinkActionDependency::Exists { entity_id },
+                // SinkActionDependency::Exists {
+                //     entity_id: attribute_id,
+                // },
+                // SinkActionDependency::Exists {
+                //     entity_id: value_type,
+                // },
+            ]),
         }
     }
 

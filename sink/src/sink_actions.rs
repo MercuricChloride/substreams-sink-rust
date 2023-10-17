@@ -78,18 +78,26 @@ impl<'a> SinkActionDependency<'a> {
     ) -> Option<Vec<SinkAction<'_>>> {
         match self {
             SinkActionDependency::IsType { type_id } => {
-                let value_id = Entities::SchemaType.id().into();
                 // if the type is not a type, we need to add the type
-                Some(vec![SinkAction::General(GeneralAction::TripleAdded {
-                    space,
-                    entity_id: type_id,
-                    attribute_id: Attributes::Type.id(),
-                    value: ValueType::Entity { id: value_id },
-                    author,
-                })])
+                Some(vec![
+                    SinkAction::General(GeneralAction::TripleAdded {
+                        space,
+                        entity_id: type_id,
+                        attribute_id: Attributes::Type.id(),
+                        value: ValueType::Entity {
+                            id: Entities::SchemaType.id().to_string(),
+                        },
+                        author,
+                    }),
+                    SinkAction::Table(TableAction::TypeAdded {
+                        space,
+                        entity_id: type_id,
+                        type_id: Entities::SchemaType.id(),
+                    }),
+                ])
             }
-            SinkActionDependency::IsAttribute { entity_id } => {
-                Some(vec![SinkAction::General(GeneralAction::TripleAdded {
+            SinkActionDependency::IsAttribute { entity_id } => Some(vec![
+                SinkAction::General(GeneralAction::TripleAdded {
                     space,
                     entity_id,
                     attribute_id: Attributes::Type.id(),
@@ -97,8 +105,13 @@ impl<'a> SinkActionDependency<'a> {
                         id: Entities::Attribute.id().into(),
                     },
                     author,
-                })])
-            }
+                }),
+                SinkAction::Table(TableAction::TypeAdded {
+                    space,
+                    entity_id,
+                    type_id: Entities::Attribute.id(),
+                }),
+            ]),
             SinkActionDependency::Exists { entity_id } => {
                 Some(vec![SinkAction::General(GeneralAction::EntityCreated {
                     space,
