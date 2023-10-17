@@ -3,7 +3,7 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction};
 
 use crate::{
     models::spaces::upsert_cover,
-    sink_actions::{ActionDependencies, SinkAction},
+    sink_actions::{ActionDependencies, SinkAction, SinkActionDependency as Dep},
 };
 
 use super::tables::TableAction;
@@ -52,102 +52,51 @@ impl SpaceAction<'_> {
 }
 
 impl<'a> ActionDependencies<'a> for SpaceAction<'a> {
-    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>> {
+    fn dependencies(&self) -> Option<Vec<Dep<'a>>> {
         match self {
             SpaceAction::CoverAdded {
                 space,
                 entity_id,
                 cover_image,
-            } => Some(vec![SinkAction::Table(TableAction::SpaceCreated {
-                entity_id,
-                space: "",
-                created_in_space: "",
-                author: "".into(),
-            })]),
+            } => Some(vec![Dep::Exists { entity_id }, Dep::IsSpace { entity_id }]),
             SpaceAction::SubspaceAdded {
                 parent_space,
                 child_space,
             } => Some(vec![
-                SinkAction::Table(TableAction::SpaceCreated {
+                Dep::Exists {
                     entity_id: parent_space,
-                    space: "",
-                    created_in_space: "",
-                    author: "",
-                }),
-                SinkAction::Table(TableAction::SpaceCreated {
+                },
+                Dep::Exists {
                     entity_id: child_space,
-                    space: "",
-                    created_in_space: "",
-                    author: "",
-                }),
+                },
+                Dep::IsSpace {
+                    entity_id: parent_space,
+                },
+                Dep::IsSpace {
+                    entity_id: child_space,
+                },
             ]),
             SpaceAction::SubspaceRemoved {
                 parent_space,
                 child_space,
             } => Some(vec![
-                SinkAction::Table(TableAction::SpaceCreated {
+                Dep::Exists {
                     entity_id: parent_space,
-                    space: "",
-                    created_in_space: "",
-                    author: "",
-                }),
-                SinkAction::Table(TableAction::SpaceCreated {
+                },
+                Dep::Exists {
                     entity_id: child_space,
-                    space: "",
-                    created_in_space: "",
-                    author: "",
-                }),
+                },
+                Dep::IsSpace {
+                    entity_id: parent_space,
+                },
+                Dep::IsSpace {
+                    entity_id: child_space,
+                },
             ]),
         }
     }
 
     fn has_fallback(&self) -> bool {
-        match self {
-            SpaceAction::CoverAdded {
-                space,
-                entity_id,
-                cover_image,
-            } => false,
-            SpaceAction::SubspaceAdded {
-                parent_space,
-                child_space,
-            } => false,
-            SpaceAction::SubspaceRemoved {
-                parent_space,
-                child_space,
-            } => false,
-        }
-    }
-
-    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction<'a>>> {
-        None
-    }
-
-    fn as_dep(&self) -> SinkAction<'a> {
-        match self {
-            SpaceAction::CoverAdded {
-                space,
-                entity_id,
-                cover_image,
-            } => SinkAction::Space(SpaceAction::CoverAdded {
-                space,
-                entity_id,
-                cover_image,
-            }),
-            SpaceAction::SubspaceAdded {
-                parent_space,
-                child_space,
-            } => SinkAction::Space(SpaceAction::SubspaceAdded {
-                parent_space,
-                child_space,
-            }),
-            SpaceAction::SubspaceRemoved {
-                parent_space,
-                child_space,
-            } => SinkAction::Space(SpaceAction::SubspaceRemoved {
-                parent_space,
-                child_space,
-            }),
-        }
+        false
     }
 }

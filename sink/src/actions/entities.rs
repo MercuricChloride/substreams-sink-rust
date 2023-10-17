@@ -3,7 +3,7 @@ use sea_orm::{ConnectionTrait, DatabaseTransaction};
 
 use crate::{
     models::entities,
-    sink_actions::{ActionDependencies, SinkAction, SinkActionDependencies as Dep},
+    sink_actions::{ActionDependencies, SinkAction, SinkActionDependency as Dep},
 };
 
 use super::general::GeneralAction;
@@ -63,92 +63,27 @@ impl EntityAction<'_> {
 }
 
 impl<'a> ActionDependencies<'a> for EntityAction<'a> {
-    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>> {
+    fn dependencies(&self) -> Option<Vec<Dep<'a>>> {
         match self {
-            _ => None,
-            // EntityAction::AvatarAdded {
-            //     space,
-            //     entity_id,
-            //     avatar_image,
-            // } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
-            //     space: "",
-            //     author: "",
-            //     entity_id,
-            // })]),
-            // EntityAction::NameAdded {
-            //     space,
-            //     entity_id,
-            //     name,
-            // } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
-            //     space: "",
-            //     author: "",
-            //     entity_id,
-            // })]),
-            // EntityAction::DescriptionAdded {
-            //     space,
-            //     entity_id,
-            //     description,
-            // } => Some(vec![SinkAction::General(GeneralAction::EntityCreated {
-            //     space: "",
-            //     author: "",
-            //     entity_id,
-            // })]),
+            EntityAction::AvatarAdded {
+                space,
+                entity_id,
+                avatar_image,
+            } => Some(vec![Dep::Exists { entity_id }]),
+            EntityAction::NameAdded {
+                space,
+                entity_id,
+                name,
+            } => Some(vec![Dep::Exists { entity_id }]),
+            EntityAction::DescriptionAdded {
+                space,
+                entity_id,
+                description,
+            } => Some(vec![Dep::Exists { entity_id }]),
         }
     }
 
     fn has_fallback(&self) -> bool {
-        match self {
-            EntityAction::AvatarAdded {
-                space,
-                entity_id,
-                avatar_image,
-            } => false,
-            EntityAction::NameAdded {
-                space,
-                entity_id,
-                name,
-            } => false,
-            EntityAction::DescriptionAdded {
-                space,
-                entity_id,
-                description,
-            } => false,
-        }
-    }
-
-    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction<'a>>> {
-        None
-    }
-
-    fn as_dep(&self) -> SinkAction<'a> {
-        match self {
-            EntityAction::AvatarAdded {
-                space,
-                entity_id,
-                avatar_image,
-            } => SinkAction::Entity(EntityAction::AvatarAdded {
-                space: "",
-                entity_id,
-                avatar_image,
-            }),
-            EntityAction::NameAdded {
-                space,
-                entity_id,
-                name,
-            } => SinkAction::Entity(EntityAction::NameAdded {
-                space: "",
-                entity_id,
-                name,
-            }),
-            EntityAction::DescriptionAdded {
-                space,
-                entity_id,
-                description,
-            } => SinkAction::Entity(EntityAction::DescriptionAdded {
-                space: "",
-                entity_id,
-                description,
-            }),
-        }
+        true
     }
 }

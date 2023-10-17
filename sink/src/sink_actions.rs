@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::actions::entities::EntityAction;
@@ -37,7 +38,7 @@ use tokio_stream::StreamExt;
 ///
 /// The reason for this is just so we can keep track of what actions we have taken in the database.
 /// In addition to specific actions that should do special things, which are the rest of the variants.
-#[derive(Debug, Clone, Eq, PartialEq, Hash, Copy)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum SinkAction<'a> {
     Table(TableAction<'a>),
     Space(SpaceAction<'a>),
@@ -48,8 +49,8 @@ pub enum SinkAction<'a> {
 /// This enum represents the different dependencies that a sink action can have.
 /// For example, if an entity is given a "types" of "person", that "person" entity needs
 /// to have a "types" of "type", otherwise the graph will be inconsistent.
-#[derive(PartialEq, Debug, Eq, Hash, Clone)]
-pub enum SinkActionDependencies<'a> {
+#[derive(PartialEq, Debug, Eq, Hash, Copy, Clone)]
+pub enum SinkActionDependency<'a> {
     /// Indicates this action requires a type entity to be created
     IsType { type_id: &'a str },
 
@@ -69,21 +70,140 @@ pub enum SinkActionDependencies<'a> {
     },
 }
 
+impl<'a> SinkActionDependency<'a> {
+    pub fn fallback_actions(
+        &'a self,
+        author: &'a str,
+        space: &'a str,
+    ) -> Option<Vec<SinkAction<'_>>> {
+        match self {
+            SinkActionDependency::IsType { type_id } => {
+                let value_id = Entities::SchemaType.id().into();
+                // if the type is not a type, we need to add the type
+                Some(vec![SinkAction::General(GeneralAction::TripleAdded {
+                    space,
+                    entity_id: type_id,
+                    attribute_id: Attributes::Type.id(),
+                    value: ValueType::Entity { id: value_id },
+                    author,
+                })])
+            }
+            SinkActionDependency::IsAttribute { entity_id } => {
+                Some(vec![SinkAction::General(GeneralAction::TripleAdded {
+                    space,
+                    entity_id,
+                    attribute_id: Attributes::Type.id(),
+                    value: ValueType::Entity {
+                        id: Entities::Attribute.id().into(),
+                    },
+                    author,
+                })])
+            }
+            SinkActionDependency::Exists { entity_id } => {
+                Some(vec![SinkAction::General(GeneralAction::EntityCreated {
+                    space,
+                    entity_id,
+                    author,
+                })])
+            }
+            SinkActionDependency::ValueTypeMatches { .. }
+            | SinkActionDependency::IsSpace { .. } => None,
+        }
+    }
+
+    pub async fn met(
+        self,
+        map: &mut HashMap<Self, bool>,
+        db: &DatabaseTransaction,
+    ) -> Result<bool, Error> {
+        Ok(match map.get(&self) {
+            Some(value) => {
+                if *value {
+                    false
+                } else {
+                    self.met_in_db(db).await?
+                }
+            }
+            None => {
+                let met_in_db = self.met_in_db(db).await?;
+                map.insert(self, met_in_db);
+                met_in_db
+            }
+        })
+    }
+
+    pub async fn met_in_db(&self, db: &DatabaseTransaction) -> Result<bool, Error> {
+        Ok(match &self {
+            SinkActionDependency::IsType { type_id } => {
+                triples::exists(
+                    db,
+                    type_id,
+                    Attributes::Type.id(),
+                    Entities::SchemaType.id(),
+                )
+                .await?
+            }
+            SinkActionDependency::IsAttribute { entity_id } => {
+                triples::exists(
+                    db,
+                    entity_id,
+                    Attributes::Type.id(),
+                    Entities::Attribute.id(),
+                )
+                .await?
+            }
+            SinkActionDependency::IsSpace { entity_id } => spaces::exists(db, entity_id).await?,
+            SinkActionDependency::Exists { entity_id } => entities::exists(db, entity_id).await?,
+            SinkActionDependency::ValueTypeMatches {
+                attribute_id,
+                value_type,
+            } => triples::exists(db, attribute_id, Attributes::ValueType.id(), value_type).await?,
+        })
+    }
+
+    /// This function checks if a sink_action is solving one of these dependencies
+    pub fn match_action(action: &SinkAction<'a>) -> Option<SinkActionDependency<'a>> {
+        match action {
+            SinkAction::Table(action) => {
+                if let TableAction::TypeAdded {
+                    space,
+                    entity_id,
+                    type_id,
+                } = action
+                {
+                    if type_id == &Entities::SchemaType.id() {
+                        return Some(SinkActionDependency::IsType { type_id: entity_id });
+                    }
+                    if type_id == &Entities::Attribute.id() {
+                        return Some(SinkActionDependency::IsAttribute { entity_id });
+                    }
+                }
+            }
+            SinkAction::General(action) => {
+                if let GeneralAction::EntityCreated {
+                    space,
+                    entity_id,
+                    author,
+                } = action
+                {
+                    return Some(SinkActionDependency::Exists { entity_id });
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
 pub trait ActionDependencies<'a> {
     /// This function should return the dependencies of this action
-    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>>;
+    fn dependencies(&self) -> Option<Vec<SinkActionDependency<'a>>>;
     /// If this action has a fallback, this function should return true
     fn has_fallback(&self) -> bool;
-    /// If this action has a fallback, this function should return the fallback actions
-    /// to mend the graph. These should always succeed
-    fn fallback(&self) -> Option<Vec<SinkAction<'a>>>;
-    /// This function is used to return a sink action, as a "dependency node"
-    /// Which is just a sink action, without an author or space.
-    fn as_dep(&self) -> SinkAction<'a>;
 }
 
 impl<'a> ActionDependencies<'a> for SinkAction<'a> {
-    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>> {
+    fn dependencies(&self) -> Option<Vec<SinkActionDependency<'a>>> {
         match self {
             SinkAction::Table(table) => table.dependencies(),
             SinkAction::Space(space) => space.dependencies(),
@@ -100,74 +220,44 @@ impl<'a> ActionDependencies<'a> for SinkAction<'a> {
             SinkAction::General(general) => general.has_fallback(),
         }
     }
-
-    fn fallback(&self) -> Option<Vec<SinkAction<'a>>> {
-        match self {
-            SinkAction::Table(table) => table.fallback(),
-            SinkAction::Space(space) => space.fallback(),
-            SinkAction::Entity(entity) => entity.fallback(),
-            SinkAction::General(general) => general.fallback(),
-        }
-    }
-
-    fn as_dep(&self) -> SinkAction<'a> {
-        match self {
-            SinkAction::Table(table) => table.as_dep(),
-            SinkAction::Space(space) => space.as_dep(),
-            SinkAction::Entity(entity) => entity.as_dep(),
-            SinkAction::General(general) => general.as_dep(),
-        }
-    }
 }
 
-pub async fn handle_sink_actions(
-    actions: &Vec<SinkAction<'_>>,
-    txn: &DatabaseTransaction,
-    use_space_queries: bool,
-    max_connections: usize,
-) -> Result<(), Error> {
-    let mut futures = FuturesOrdered::new();
-    let mut chunk = Vec::new();
+// pub async fn handle_sink_actions(
+//     actions: Vec<SinkAction<'_>>,
+//     txn: &DatabaseTransaction,
+//     use_space_queries: bool,
+//     max_connections: usize,
+// ) -> Result<(), Error> {
+//     let mut futures = FuturesOrdered::new();
+//     let mut chunk = Vec::new();
 
-    for action in actions.iter() {
-        chunk.push(action.execute(txn, use_space_queries));
+//     for action in actions.into_iter() {
+//         chunk.push(action.execute(txn, use_space_queries));
 
-        if chunk.len() == max_connections {
-            futures.push_back(try_join_all(chunk));
-            chunk = Vec::new();
-        }
-    }
+//         if chunk.len() == max_connections {
+//             futures.push_back(try_join_all(chunk));
+//             chunk = Vec::new();
+//         }
+//     }
 
-    if !chunk.is_empty() {
-        futures.push_back(try_join_all(chunk));
-    }
+//     if !chunk.is_empty() {
+//         futures.push_back(try_join_all(chunk));
+//     }
 
-    while let Some(result) = futures.next().await {
-        result?;
-    }
+//     while let Some(result) = futures.next().await {
+//         result?;
+//     }
 
-    Ok(())
-}
+//     Ok(())
+// }
 
 impl<'a> SinkAction<'a> {
-    pub async fn execute(
-        &self,
-        db: &DatabaseTransaction,
-        space_queries: bool,
-    ) -> Result<(), Error> {
+    pub async fn execute(self, db: &DatabaseTransaction, space_queries: bool) -> Result<(), Error> {
         match self {
             SinkAction::Table(action) => action.execute(db, space_queries).await,
             SinkAction::Entity(action) => action.execute(db, space_queries).await,
             SinkAction::General(action) => action.execute(db).await,
             SinkAction::Space(action) => action.execute(db).await,
-        }
-    }
-
-    pub async fn check_if_exists(&self, db: &DatabaseTransaction) -> Result<bool, Error> {
-        match self {
-            SinkAction::Table(action) => action.check_if_exists(db).await,
-            SinkAction::General(action) => action.check_if_exists(db).await,
-            _ => todo!("check_if_exists for sink actions other than table or general actions"),
         }
     }
 
@@ -213,7 +303,6 @@ impl<'a> SinkAction<'a> {
                     space,
                     entity_id,
                     attribute_id,
-                    value,
                 } => 8,
             },
         }

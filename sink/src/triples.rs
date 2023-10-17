@@ -42,7 +42,7 @@ use crate::{
 pub const IPFS_ENDPOINT: &str = "https://ipfs.network.thegraph.com/api/v0/cat?arg=";
 
 // An action is a collection of action triples, this is used to represent a change to the graph.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Action {
     /// Tbh I'm not sure why this is called type, but it is.
     #[serde(rename = "type")]
@@ -111,6 +111,10 @@ impl Action {
     pub fn get_sink_actions<'a>(&'a self) -> Vec<SinkAction<'a>> {
         let mut sink_actions = Vec::new();
         for action in self.actions.iter() {
+            if action.is_missing_data() {
+                println!("Missing data for: {action:?}");
+                continue;
+            }
             let (default_action, sink_action) = action.get_sink_actions();
             sink_actions.push(default_action);
             if let Some(sink_action) = sink_action {
@@ -161,7 +165,7 @@ impl Action {
         Ok(action)
     }
 
-    pub async fn decode_from_entry(entry: &EntryAdded) -> Result<Self, Error> {
+    pub async fn decode_from_entry<'a>(entry: EntryAdded) -> Result<Action, Error> {
         let uri = &entry.uri;
         match uri {
             uri if uri.starts_with("data:application/json;base64,") => {
@@ -344,7 +348,7 @@ impl ActionTriple {
                     ValueType::Image { id, value } => value.to_string().is_empty(),
                     ValueType::Date { id, value } => value.to_string().is_empty(),
                     ValueType::Url { id, value } => value.to_string().is_empty(),
-                    _ => false,
+                    ValueType::Entity { id } => id.is_empty(),
                 };
                 entity_id.is_empty()
                     || attribute_id.is_empty()
@@ -430,7 +434,7 @@ impl ActionTriple {
                 space,
                 entity_id,
                 attribute_id,
-                value,
+                value: value.clone(),
                 author,
             }),
             ActionTriple::DeleteTriple {
@@ -443,7 +447,7 @@ impl ActionTriple {
                 space,
                 entity_id,
                 attribute_id,
-                value,
+                value: value.clone(),
                 author,
             }),
         }
@@ -505,10 +509,9 @@ impl ActionTriple {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::Entity { id } = value {
                     return Some(SinkAction::Table(TableAction::AttributeAdded {
-                        attribute_id: id,
                         space,
                         entity_id,
-                        value,
+                        attribute_id: id,
                     }));
                 } else {
                     None
@@ -747,7 +750,7 @@ pub enum ValueType {
 impl Default for ValueType {
     fn default() -> Self {
         ValueType::Entity {
-            id: "Default-entity-id".to_string(),
+            id: "Default-entity-id".into(),
         }
     }
 }
@@ -798,7 +801,7 @@ impl ValueType {
     }
 }
 
-impl<'de> Deserialize<'de> for ValueType {
+impl<'de, 'a: 'de> Deserialize<'de> for ValueType {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -807,27 +810,27 @@ impl<'de> Deserialize<'de> for ValueType {
 
         match val.get("type").and_then(Value::as_str) {
             Some("number") => Ok(ValueType::Number {
-                id: val["id"].as_str().unwrap().to_string(),
-                value: val["value"].as_i64().unwrap(),
+                id: val["id"].as_str().unwrap().into(),
+                value: val["value"].as_i64().unwrap().into(),
             }),
             Some("string") => Ok(ValueType::String {
-                id: val["id"].as_str().unwrap().to_string(),
-                value: val["value"].as_str().unwrap().to_string(),
+                id: val["id"].as_str().unwrap().into(),
+                value: val["value"].as_str().unwrap().into(),
             }),
             Some("image") => Ok(ValueType::Image {
-                id: val["id"].as_str().unwrap().to_string(),
-                value: val["value"].as_str().unwrap().to_string(),
+                id: val["id"].as_str().unwrap().into(),
+                value: val["value"].as_str().unwrap().into(),
             }),
             Some("entity") => Ok(ValueType::Entity {
-                id: val["id"].as_str().unwrap().to_string(),
+                id: val["id"].as_str().unwrap().into(),
             }),
             Some("date") => Ok(ValueType::Date {
-                id: val["id"].as_str().unwrap().to_string(),
-                value: val["value"].as_str().unwrap().to_string(),
+                id: val["id"].as_str().unwrap().into(),
+                value: val["value"].as_str().unwrap().into(),
             }),
             Some("url") => Ok(ValueType::Url {
-                id: val["id"].as_str().unwrap().to_string(),
-                value: val["value"].as_str().unwrap().to_string(),
+                id: val["id"].as_str().unwrap().into(),
+                value: val["value"].as_str().unwrap().into(),
             }),
             _ => Err(serde::de::Error::custom("Unknown type")),
         }

@@ -4,7 +4,7 @@ use sea_orm::{DatabaseConnection, DatabaseTransaction};
 use crate::{
     constants::{self, Attributes, Entities},
     models::{entities, spaces, triples},
-    sink_actions::{ActionDependencies, SinkAction},
+    sink_actions::{ActionDependencies, SinkAction, SinkActionDependency},
     triples::ValueType,
 };
 
@@ -51,8 +51,6 @@ pub enum TableAction<'a> {
         entity_id: &'a str,
         /// The ID of the attribute entity
         attribute_id: &'a str,
-        /// The value of the triple
-        value: &'a ValueType,
     },
 
     /// We care about a ValueType being added to an entity because we need this when adding attributes to a type in the graph.
@@ -116,20 +114,18 @@ impl TableAction<'_> {
                 space,
                 entity_id,
                 attribute_id,
-                value,
             } => {
-                let space = space.to_lowercase();
-                let value_id = value.id().to_string();
+                // TODO GO PUT THIS IN THE TRIPLE HANDLER
                 if space_queries {
                     // we need to check the value type of the value
                     // if it doesn't have a value type, we need to assume default, which is text? TODO Verify this?
                     // if its text, this means we just add a column to the table that points to a triple?
 
                     // add the relation to the entity in the space schema
-                    entities::add_relation(db, &entity_id, &attribute_id, &value, &space).await?;
+                    entities::add_relation(db, &entity_id, &attribute_id, &space).await?;
                 }
                 // add the attribute to the entity in the global schema
-                entities::add_attribute(db, entity_id.to_string(), value_id).await?
+                entities::add_attribute(db, entity_id.to_string(), attribute_id.to_string()).await?
             }
 
             TableAction::ValueTypeAdded {
@@ -157,75 +153,30 @@ impl TableAction<'_> {
 
         Ok(())
     }
-
-    pub async fn check_if_exists(self, db: &DatabaseTransaction) -> Result<bool, Error> {
-        match self {
-            TableAction::SpaceCreated {
-                entity_id,
-                space,
-                created_in_space,
-                author,
-            } => Ok(spaces::exists(db, space).await?),
-            TableAction::TypeAdded {
-                space,
-                entity_id,
-                type_id,
-            } => Ok(triples::exists(db, entity_id, Attributes::Type.id(), type_id).await?),
-            TableAction::AttributeAdded {
-                space,
-                entity_id,
-                attribute_id,
-                value,
-            } => {
-                todo!()
-            }
-            TableAction::ValueTypeAdded {
-                space,
-                entity_id,
-                attribute_id,
-                value_type,
-            } => todo!(),
-        }
-    }
 }
 
 impl<'a> ActionDependencies<'a> for TableAction<'a> {
-    fn dependencies(&self) -> Option<Vec<SinkAction<'a>>> {
+    fn dependencies(&self) -> Option<Vec<SinkActionDependency<'a>>> {
         match self {
             TableAction::TypeAdded { type_id, space, .. } => {
                 if *type_id != Entities::SchemaType.id() {
-                    Some(vec![SinkAction::Table(TableAction::TypeAdded {
-                        space: "",
-                        entity_id: type_id,
-                        type_id: Entities::SchemaType.id(),
-                    })])
+                    Some(vec![SinkActionDependency::IsType { type_id }])
                 } else {
                     None
                 }
             }
             TableAction::AttributeAdded {
-                value,
                 space,
                 entity_id,
-                ..
+                attribute_id,
             } => Some(vec![
-                SinkAction::Table(TableAction::TypeAdded {
-                    space: "",
-                    entity_id: value.id(),
-                    type_id: Entities::Attribute.id(),
-                }),
-                SinkAction::Table(TableAction::TypeAdded {
-                    space: "",
-                    entity_id,
-                    type_id: Entities::SchemaType.id(),
-                }),
+                SinkActionDependency::IsType { type_id: entity_id },
+                SinkActionDependency::IsAttribute {
+                    entity_id: attribute_id,
+                },
             ]),
             TableAction::SpaceCreated { entity_id, .. } => {
-                Some(vec![SinkAction::General(GeneralAction::EntityCreated {
-                    space: "",
-                    entity_id,
-                    author: "",
-                })])
+                Some(vec![SinkActionDependency::Exists { entity_id }])
             }
             TableAction::ValueTypeAdded { value_type, .. } => None,
         }
@@ -242,7 +193,6 @@ impl<'a> ActionDependencies<'a> for TableAction<'a> {
                 space,
                 entity_id,
                 attribute_id,
-                value,
             } => true,
             TableAction::ValueTypeAdded {
                 space,
@@ -256,111 +206,6 @@ impl<'a> ActionDependencies<'a> for TableAction<'a> {
                 created_in_space,
                 author,
             } => true,
-        }
-    }
-
-    fn fallback(&self) -> Option<Vec<crate::sink_actions::SinkAction<'a>>> {
-        match self {
-            TableAction::TypeAdded {
-                space,
-                entity_id,
-                type_id,
-            } => {
-                Some(vec![
-                    SinkAction::General(GeneralAction::EntityCreated {
-                        space,
-                        entity_id,
-                        author: "".into(),
-                    }),
-                    // Make the type_id a type
-                    SinkAction::Table(TableAction::TypeAdded {
-                        space,
-                        entity_id: type_id,
-                        type_id: Entities::SchemaType.id(),
-                    }),
-                ])
-            }
-
-            TableAction::AttributeAdded {
-                space,
-                entity_id,
-                attribute_id,
-                value,
-            } => {
-                Some(vec![
-                    // Make the attribute_id an attribute
-                    SinkAction::Table(TableAction::TypeAdded {
-                        space: space,
-                        entity_id: attribute_id,
-                        type_id: Entities::Attribute.id(),
-                    }),
-                ])
-            }
-
-            TableAction::SpaceCreated {
-                entity_id,
-                space,
-                created_in_space,
-                author,
-            } => {
-                Some(vec![
-                    // Create the entity_id
-                    SinkAction::General(GeneralAction::EntityCreated {
-                        space: created_in_space,
-                        author: author,
-                        entity_id,
-                    }),
-                ])
-            }
-
-            _ => None,
-        }
-    }
-
-    fn as_dep(&self) -> SinkAction<'a> {
-        match self {
-            TableAction::SpaceCreated {
-                entity_id,
-                space,
-                created_in_space,
-                author,
-            } => SinkAction::Table(TableAction::SpaceCreated {
-                space: "",
-                created_in_space: "".into(),
-                author: "".into(),
-                entity_id: entity_id.clone(),
-            }),
-            TableAction::TypeAdded {
-                space,
-                entity_id,
-                type_id,
-            } => SinkAction::Table(TableAction::TypeAdded {
-                space: "".into(),
-                entity_id: entity_id.clone(),
-                type_id: type_id.clone(),
-            }),
-            TableAction::AttributeAdded {
-                space,
-                entity_id,
-                attribute_id,
-                value,
-            } => SinkAction::Table(TableAction::AttributeAdded {
-                space: "".into(),
-                entity_id: entity_id.clone(),
-                attribute_id: attribute_id.clone(),
-                value: value.clone(),
-            }),
-            TableAction::ValueTypeAdded {
-                space,
-                entity_id,
-                attribute_id,
-                value_type,
-            } => SinkAction::Table(TableAction::ValueTypeAdded {
-                space: "".into(),
-                entity_id: entity_id.clone(),
-                attribute_id: attribute_id.clone(),
-                value_type: value_type.clone(),
-            }),
         }
     }
 }

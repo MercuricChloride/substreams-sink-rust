@@ -22,6 +22,7 @@ pub fn triple_exists_string(entity: &str, attribute: &str, value: &str) -> Strin
 }
 
 pub mod spaces {
+    use anyhow::Error;
     use entity::spaces::*;
     use migration::{DbErr, OnConflict};
     use sea_orm::{
@@ -88,7 +89,7 @@ pub mod spaces {
         Ok(())
     }
 
-    pub async fn exists(db: &DatabaseTransaction, space: &str) -> Result<bool, DbErr> {
+    pub async fn exists(db: &DatabaseTransaction, space: &str) -> Result<bool, Error> {
         let space = Entity::find_by_id(space).one(db).await?;
         Ok(space.is_some())
     }
@@ -145,23 +146,20 @@ pub mod entities {
             let result = db
                 .execute(Statement::from_string(
                     DbBackend::Postgres,
-                    table_create_statement.clone(),
+                    &table_create_statement,
                 ))
                 .await;
 
             db.execute(Statement::from_string(
                 DbBackend::Postgres,
-                table_disable_statement.clone(),
+                &table_disable_statement,
             ))
             .await?;
 
             if let Ok(result) = result {
                 table_create_result = Some(result);
             } else if retry_count == 3 {
-                // println!(
-                //     "Couldn't create table for entity {} for space {}. \n\n {:?}",
-                //     entity_id, &entity.defined_in, result
-                // );
+                table_create_result = None;
             } else {
                 retry_count += 1;
             }
@@ -172,10 +170,7 @@ pub mod entities {
             let table_comment = table_comment_string(&entity.defined_in, entity_id, &entity_name);
 
             let result = db
-                .execute(Statement::from_string(
-                    DbBackend::Postgres,
-                    table_comment.clone(),
-                ))
+                .execute(Statement::from_string(DbBackend::Postgres, &table_comment))
                 .await;
             if let Err(err) = result {
                 // println!(
@@ -196,12 +191,11 @@ pub mod entities {
         db: &DatabaseTransaction,
         parent_entity_id: &str,
         attribute_id: &str,
-        value: &ValueType,
         space: &str,
     ) -> Result<(), Error> {
-        let value_entity = Entity::find_by_id(value.id()).one(db).await?;
+        let relation_entity = Entity::find_by_id(attribute_id).one(db).await?;
 
-        let is_relation = if let Some(value_entity) = value_entity {
+        let is_relation = if let Some(value_entity) = relation_entity {
             if let Some(value_type) = value_entity.value_type {
                 if value_type == constants::Entities::Relation.id() {
                     true
@@ -216,7 +210,7 @@ pub mod entities {
         };
 
         if is_relation {
-            let child_entity_id = value.id();
+            let child_entity_id = attribute_id;
             // println!(
             //     "Adding relation from child {} to parent {} for space {}",
             //     child_entity_id, parent_entity_id, space
@@ -485,31 +479,25 @@ pub mod entities {
         space: &str,
         space_queries: bool,
     ) -> Result<(), DbErr> {
-        let entity = Entity::find_by_id(entity_id).one(db).await?;
-        if let Some(entity) = entity {
-            let mut entity: ActiveModel = entity.into();
-            entity.name = ActiveValue::Set(Some(name.to_string()));
-            entity.save(db).await?;
-        } else {
-            let entity = ActiveModel {
-                id: ActiveValue::Set(entity_id.to_string()),
-                name: ActiveValue::Set(Some(name.to_string())),
-                defined_in: ActiveValue::Set(space.to_string()),
-                ..Default::default()
-            };
-            Entity::insert(entity)
-                .on_conflict(
-                    OnConflict::column(Column::Id)
-                        .update_column(Column::Name)
-                        .to_owned(),
-                )
-                .exec(db)
-                .await?;
-        }
+        let entity = ActiveModel {
+            id: ActiveValue::Set(entity_id.to_string()),
+            name: ActiveValue::Set(Some(name.to_string())),
+            defined_in: ActiveValue::Set(space.to_string()),
+            ..Default::default()
+        };
+        Entity::insert(entity)
+            .on_conflict(
+                OnConflict::column(Column::Id)
+                    .update_column(Column::Name)
+                    .to_owned(),
+            )
+            .exec(db)
+            .await?;
+        // }
 
         // if the entity is a type, we need to add a comment updating the name of the table
         if space_queries {
-            if let Some(entity) = Entity::find_by_id(entity_id.clone()).one(db).await? {
+            if let Some(entity) = Entity::find_by_id(entity_id).one(db).await? {
                 if let (Some(entity_name), Some(is_type)) = (entity.name, entity.is_type) {
                     if !is_type {
                         return Ok(());
@@ -741,15 +729,17 @@ pub mod triples {
     use migration::{DbErr, OnConflict};
     use sea_orm::{
         ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection,
-        DatabaseTransaction, DbBackend, EntityTrait, QueryFilter, Set, Statement,
+        DatabaseTransaction, DbBackend, EntityTrait, QueryFilter, Set, Statement, TransactionTrait,
     };
     use sea_query::RcOrArc;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     use crate::{
         constants::{Attributes, Entities, ROOT_SPACE_ADDRESS},
         models::entities::{self, upsert_is_type},
-        triples::{ActionTriple, ValueType},
+        triples::{Action, ActionTriple, ValueType},
+        try_action,
     };
 
     use super::triple_exists_string;
@@ -758,7 +748,7 @@ pub mod triples {
         db: &DatabaseTransaction,
         entity_id: &str,
         attribute_id: &str,
-        value: &ValueType,
+        value: ValueType,
         space: &str,
         author: &str,
     ) -> Result<(), DbErr> {
@@ -818,7 +808,7 @@ pub mod triples {
         db: &DatabaseTransaction,
         entity_id: &str,
         attribute_id: &str,
-        value: &ValueType,
+        value: ValueType,
         space: &str,
         author: &str,
     ) -> Result<(), DbErr> {
@@ -837,8 +827,10 @@ pub mod triples {
         Ok(())
     }
 
-    pub async fn bootstrap(db: &DatabaseTransaction) -> Result<(), Error> {
+    pub async fn bootstrap(db: Arc<DatabaseConnection>) -> Result<(), Error> {
+        println!("Starting bootstrap");
         use strum::IntoEnumIterator;
+        let txn = db.begin().await?;
         let author = "BOOTSTRAP";
 
         let name_attribute = Attributes::Name.id();
@@ -851,24 +843,25 @@ pub mod triples {
         let space = ROOT_SPACE_ADDRESS.to_string();
 
         for entity in Entities::iter() {
-            // make an entity for the attribute
+            // make an entity for the entity
             let entity_id = entity.id();
-            entities::create(db, entity_id, &space).await?;
+            entities::create(&txn, entity_id, &space).await?;
         }
 
         for attribute in Attributes::iter() {
             // make an entity for the attribute
             let entity_id = attribute.id();
-            entities::create(db, entity_id.into(), &space).await?;
+            entities::create(&txn, entity_id.into(), &space).await?;
         }
+        txn.commit().await?;
 
         for attribute in Attributes::iter() {
             // bootstrap the name of the attribute
             let entity_id = attribute.id();
             let value = attribute.name();
             let value = ValueType::String {
-                id: entity_id.to_string(),
-                value: value.to_string(),
+                id: entity_id.into(),
+                value: value.into(),
             };
 
             let action = ActionTriple::CreateTriple {
@@ -876,34 +869,34 @@ pub mod triples {
                 attribute_id: name_attribute.into(),
                 value: value.into(),
                 space: space.clone(),
-                author: author.to_string(),
+                author: author.into(),
             };
             action_triples.push(action);
 
             // bootstrap the attribute to have a type of attribute
             let value = ValueType::Entity {
-                id: attribute_entity.to_string(),
+                id: attribute_entity.into(),
             };
             let action = ActionTriple::CreateTriple {
                 entity_id: entity_id.into(),
                 attribute_id: type_attribute.into(),
                 value: value.into(),
                 space: space.clone(),
-                author: author.to_string(),
+                author: author.into(),
             };
             action_triples.push(action);
 
             // bootstrap the value_type of the attribute if it has one
             if let Some(value_type) = attribute.value_type() {
                 let value = ValueType::Entity {
-                    id: value_type.id().to_string(),
+                    id: value_type.id().into(),
                 };
                 let action = ActionTriple::CreateTriple {
                     entity_id: entity_id.into(),
                     attribute_id: value_type_attribute.into(),
                     value: value.into(),
                     space: space.clone(),
-                    author: author.to_string(),
+                    author: author.into(),
                 };
                 action_triples.push(action);
             }
@@ -915,8 +908,8 @@ pub mod triples {
             let space = ROOT_SPACE_ADDRESS.to_string();
             let value = entity.name();
             let value = ValueType::String {
-                id: entity_id.to_string(),
-                value: value.to_string(),
+                id: entity_id.into(),
+                value: value.into(),
             };
 
             // make the entity a type
@@ -924,7 +917,7 @@ pub mod triples {
                 entity_id: entity_id.into(),
                 attribute_id: Attributes::Type.id().into(),
                 value: ValueType::Entity {
-                    id: Entities::SchemaType.id().to_string(),
+                    id: Entities::SchemaType.id().into(),
                 },
                 space: space.clone(),
                 author: author.to_string(),
@@ -942,7 +935,7 @@ pub mod triples {
 
             // bootstrap the entity to have a type of schema type
             let value = ValueType::Entity {
-                id: Entities::SchemaType.id().to_string(),
+                id: Entities::SchemaType.id().into(),
             };
             let action = ActionTriple::CreateTriple {
                 entity_id: entity_id.into(),
@@ -956,7 +949,7 @@ pub mod triples {
             for attribute in entity.attributes() {
                 // add the attribute to the entity
                 let value = ValueType::Entity {
-                    id: attribute.id().to_string(),
+                    id: attribute.id().into(),
                 };
                 let action = ActionTriple::CreateTriple {
                     entity_id: entity_id.into(),
@@ -969,33 +962,17 @@ pub mod triples {
             }
         }
 
-        let mut default = Vec::new();
-        let mut optional = Vec::new();
-        for action_triple in action_triples.iter() {
-            let (sink_action, option_action) = action_triple.get_sink_actions();
-            default.push(sink_action);
+        let action: Action = Action {
+            action_type: "asdf".into(),
+            version: "asfd".into(),
+            actions: action_triples,
+            space,
+            author: author.into(),
+        };
+        let sink_actions = action.get_sink_actions();
 
-            if let Some(option_action) = option_action {
-                optional.push(option_action);
-            }
-        }
-
-        default.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
-        optional.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
-
-        for action in default {
-            let result = action.execute(db, true).await;
-            if let Err(err) = result {
-                panic!("ERROR: {:?}, on ACTION {:?}", err, action);
-            }
-        }
-
-        for action in optional {
-            let result = action.execute(db, true).await;
-            if let Err(err) = result {
-                panic!("ERROR: {:?}, on ACTION {:?}", err, action);
-            }
-        }
+        try_action(sink_actions, db, true, author, ROOT_SPACE_ADDRESS).await?;
+        println!("Finished boostrap");
 
         Ok(())
     }
