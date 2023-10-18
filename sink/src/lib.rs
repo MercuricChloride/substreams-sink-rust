@@ -562,7 +562,7 @@ mod tests {
     async fn test_all_entries() {
         dotenv().ok();
 
-        let max_connections = 199;
+        let max_connections = 499;
         let database_url = std::env::var("DATABASE_URL").unwrap();
 
         let mut connection_options = ConnectOptions::new(database_url);

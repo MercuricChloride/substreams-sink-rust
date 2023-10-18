@@ -10,5 +10,6 @@ pub mod log_entries;
 pub mod proposals;
 pub mod proposed_versions;
 pub mod spaces;
+pub mod subspaces;
 pub mod triples;
 pub mod versions;

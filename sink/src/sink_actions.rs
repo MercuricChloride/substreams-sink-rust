@@ -278,7 +278,7 @@ impl<'a> SinkAction<'a> {
         match self {
             SinkAction::Table(action) => action.execute(db, space_queries).await,
             SinkAction::Entity(action) => action.execute(db, space_queries).await,
-            SinkAction::General(action) => action.execute(db).await,
+            SinkAction::General(action) => action.execute(db, space_queries).await,
             SinkAction::Space(action) => action.execute(db).await,
         }
     }

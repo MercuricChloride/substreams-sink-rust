@@ -2,7 +2,7 @@ use anyhow::Error;
 use sea_orm::{ConnectionTrait, DatabaseTransaction};
 
 use crate::{
-    models::spaces::upsert_cover,
+    models::spaces::{upsert_cover, self},
     sink_actions::{ActionDependencies, SinkAction, SinkActionDependency as Dep},
 };
 
@@ -40,11 +40,11 @@ impl SpaceAction<'_> {
             SpaceAction::SubspaceAdded {
                 parent_space,
                 child_space,
-            } => todo!("SubspaceAdded"),
+            } => spaces::add_subspace(db, parent_space, child_space).await?,
             SpaceAction::SubspaceRemoved {
                 parent_space,
                 child_space,
-            } => todo!("SubspaceRemoved"),
+            } => spaces::remove_subspace(db, parent_space, child_space).await?,
         };
 
         Ok(())

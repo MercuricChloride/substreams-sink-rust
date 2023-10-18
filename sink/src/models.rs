@@ -22,6 +22,7 @@ pub fn escape(input: &str) -> String {
     input
         .chars()
         .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .filter(|c| c != &'\n')
         .collect::<String>()
 }
 
@@ -31,7 +32,7 @@ pub fn triple_exists_string(entity: &str, attribute: &str, value: &str) -> Strin
 
 pub mod spaces {
     use anyhow::Error;
-    use entity::spaces::*;
+    use entity::{spaces::*, subspaces};
     use migration::{DbErr, OnConflict};
     use sea_orm::{
         ActiveValue, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend,
@@ -100,6 +101,41 @@ pub mod spaces {
     pub async fn exists(db: &DatabaseTransaction, space: &str) -> Result<bool, Error> {
         let space = Entity::find_by_id(space).one(db).await?;
         Ok(space.is_some())
+    }
+
+    pub async fn add_subspace(db: &DatabaseTransaction, parent_space_id: &str, child_space_id: &str) -> Result<(), Error>{
+        let id = format!("{parent_space_id}-{child_space_id}");
+
+        let model = subspaces::ActiveModel{
+            id: ActiveValue::Set(id),
+            parent_space: ActiveValue::Set(parent_space_id.to_string()),
+            child_space: ActiveValue::Set(child_space_id.to_string()),
+        };
+
+
+        subspaces::Entity::insert(model)
+            .on_conflict(OnConflict::column(subspaces::Column::Id).do_nothing().to_owned())
+            .do_nothing()
+            .exec(db)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn remove_subspace(db: &DatabaseTransaction, parent_space_id: &str, child_space_id: &str) -> Result<(), Error>{
+        let id = format!("{parent_space_id}-{child_space_id}");
+
+        let model = subspaces::ActiveModel{
+            id: ActiveValue::Set(id),
+            parent_space: ActiveValue::Set(parent_space_id.to_string()),
+            child_space: ActiveValue::Set(child_space_id.to_string()),
+        };
+
+        subspaces::Entity::delete(model)
+            .exec(db)
+            .await?;
+
+        Ok(())
     }
 }
 
@@ -236,7 +272,7 @@ pub mod entities {
             let child_entity = child_entity.unwrap();
 
             // grab the entity of the parent
-            let parent_entity = Entity::find_by_id(parent_entity_id.clone()).one(db).await?;
+            let parent_entity = Entity::find_by_id(parent_entity_id).one(db).await?;
             if let None = parent_entity {
                 return Err(Error::msg(format!(
                     "Parent entity {} doesn't exist",
@@ -295,7 +331,7 @@ pub mod entities {
                 txn.commit().await?;
 
                 let column_add_statement = format!(
-                    "ALTER TABLE \"{child_space}\".\"{child_entity}\" ADD COLUMN IF NOT EXISTS \"parent_{parent_entity}\" TEXT REFERENCES \"{parent_space}\".\"{parent_entity}\"(id);",
+                    "ALTER TABLE \"{child_space}\".\"{child_entity}\" ADD COLUMN IF NOT EXISTS \"attr_{parent_entity}\" TEXT REFERENCES \"{parent_space}\".\"{parent_entity}\"(id);",
                     child_space = child_space,
                     child_entity = child_entity_id,
                     parent_space = parent_space,
@@ -313,7 +349,7 @@ pub mod entities {
                 if let Some(parent_entity_name) = parent_entity.name {
                     let txn = db.begin().await?;
                     let column_name_statement = format!(
-                        "COMMENT ON COLUMN \"{child_space}\".\"{child_entity}\".\"parent_{parent_entity}\" IS E'@name {parent_name}';",
+                        "COMMENT ON COLUMN \"{child_space}\".\"{child_entity}\".\"attr_{parent_entity}\" IS E'@name {parent_name}';",
                         child_space = child_space,
                         child_entity = child_entity_id,
                         parent_entity = parent_entity_id,
@@ -345,7 +381,7 @@ pub mod entities {
             let attribute_name = attribute.name.unwrap_or(attribute.id.clone());
             // otherwise we just need to add a column with text
             let column_add_statement = format!(
-                "ALTER TABLE \"{space}\".\"{entity}\" ADD COLUMN IF NOT EXISTS \"parent_{attribute}\" TEXT;",
+                "ALTER TABLE \"{space}\".\"{entity}\" ADD COLUMN IF NOT EXISTS \"attr_{attribute}\" TEXT;",
                 space = space,
                 entity = parent_entity_id,
                 attribute = attribute.id
@@ -357,7 +393,7 @@ pub mod entities {
             ))
             .await?;
             let column_name_statement = format!(
-                "COMMENT ON COLUMN \"{space}\".\"{entity}\".\"parent_{attribute_id}\" IS E'@name {attribute_name}';",
+                "COMMENT ON COLUMN \"{space}\".\"{entity}\".\"attr_{attribute_id}\" IS E'@name {attribute_name}';",
                 space = space,
                 entity = parent_entity_id,
                 attribute_id = attribute_id,
@@ -532,11 +568,11 @@ pub mod entities {
                 }
             }
 
-            // if the entity is an attribute, we need to rename all of the columns that have the name of: "parent_{entity_id}"
+            // if the entity is an attribute, we need to rename all of the columns that have the name of: "attr_{entity_id}"
             let tables_query = format!(
                 "SELECT table_name
                 FROM information_schema.columns
-                WHERE column_name = 'parent_{entity_id}';",
+                WHERE column_name = 'attr_{entity_id}';",
             );
 
             let tables = db
@@ -546,7 +582,7 @@ pub mod entities {
             for table in tables {
                 let table_name: String = table.try_get_by_index(0 as usize).unwrap();
                 let column_name_statement = format!(
-                    "COMMENT ON COLUMN \"{space}\".\"{table_name}\".\"parent_{entity_id}\" IS E'@name {name}';",
+                    "COMMENT ON COLUMN \"{space}\".\"{table_name}\".\"attr_{entity_id}\" IS E'@name {name}';",
                     space = space,
                     table_name = table_name,
                     entity_id = entity_id,
