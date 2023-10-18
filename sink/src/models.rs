@@ -103,18 +103,25 @@ pub mod spaces {
         Ok(space.is_some())
     }
 
-    pub async fn add_subspace(db: &DatabaseTransaction, parent_space_id: &str, child_space_id: &str) -> Result<(), Error>{
+    pub async fn add_subspace(
+        db: &DatabaseTransaction,
+        parent_space_id: &str,
+        child_space_id: &str,
+    ) -> Result<(), Error> {
         let id = format!("{parent_space_id}-{child_space_id}");
 
-        let model = subspaces::ActiveModel{
+        let model = subspaces::ActiveModel {
             id: ActiveValue::Set(id),
             parent_space: ActiveValue::Set(parent_space_id.to_string()),
             child_space: ActiveValue::Set(child_space_id.to_string()),
         };
 
-
         subspaces::Entity::insert(model)
-            .on_conflict(OnConflict::column(subspaces::Column::Id).do_nothing().to_owned())
+            .on_conflict(
+                OnConflict::column(subspaces::Column::Id)
+                    .do_nothing()
+                    .to_owned(),
+            )
             .do_nothing()
             .exec(db)
             .await?;
@@ -122,18 +129,20 @@ pub mod spaces {
         Ok(())
     }
 
-    pub async fn remove_subspace(db: &DatabaseTransaction, parent_space_id: &str, child_space_id: &str) -> Result<(), Error>{
+    pub async fn remove_subspace(
+        db: &DatabaseTransaction,
+        parent_space_id: &str,
+        child_space_id: &str,
+    ) -> Result<(), Error> {
         let id = format!("{parent_space_id}-{child_space_id}");
 
-        let model = subspaces::ActiveModel{
+        let model = subspaces::ActiveModel {
             id: ActiveValue::Set(id),
             parent_space: ActiveValue::Set(parent_space_id.to_string()),
             child_space: ActiveValue::Set(child_space_id.to_string()),
         };
 
-        subspaces::Entity::delete(model)
-            .exec(db)
-            .await?;
+        subspaces::Entity::delete(model).exec(db).await?;
 
         Ok(())
     }
@@ -773,14 +782,16 @@ pub mod accounts {
 
 pub mod triples {
     use anyhow::Error;
-    use entity::triples::*;
+    use entity::{entity_attributes, entity_types, triples::*};
     use migration::{DbErr, OnConflict};
     use sea_orm::{
         ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection,
-        DatabaseTransaction, DbBackend, EntityTrait, QueryFilter, Set, Statement, TransactionTrait,
+        DatabaseTransaction, DbBackend, EntityOrSelect, EntityTrait, QueryFilter, QuerySelect, Set,
+        Statement, TransactionTrait,
     };
-    use sea_query::RcOrArc;
-    use std::sync::Arc;
+    use sea_query::{Condition, Query, RcOrArc};
+    use tokio::{task, time::sleep};
+    use std::{sync::Arc, time::Duration};
     use uuid::Uuid;
 
     use crate::{
@@ -792,6 +803,11 @@ pub mod triples {
 
     use super::triple_exists_string;
 
+    //  To input the data for a triple:
+    //  1. Find all the types the entity has
+    //  2. For each of those types, find the types that have the attribute on them
+    //  3. For all of those types w the attribute, insert the data on the entity_id row
+
     pub async fn create(
         db: &DatabaseTransaction,
         entity_id: &str,
@@ -800,11 +816,6 @@ pub mod triples {
         space: &str,
         author: &str,
     ) -> Result<(), DbErr> {
-        // create the entity and attribute and value if they don't exist
-        //super::entities::create(db, entity_id.clone(), space.clone()).await?;
-
-        //super::entities::create(db, attribute_id.clone(), space.clone()).await?;
-
         let id = format!("{}", Uuid::new_v4());
 
         if let Some(_) = Entity::find_by_id(&id).one(db).await? {
@@ -871,6 +882,47 @@ pub mod triples {
             let mut triple: ActiveModel = triple.into();
             triple.deleted = Set(true);
             triple.save(db).await?;
+        }
+        Ok(())
+    }
+
+    /// This function inserts the triple data into the appropriate table(s)
+    pub async fn insert_triple_data(
+        db: &DatabaseTransaction,
+        entity_id: &str,
+        attribute_id: &str,
+        value: ValueType,
+    ) -> Result<(), DbErr> {
+        let value = value.value();
+
+let bulk_insert = format!("
+DO $$
+DECLARE
+    name text;
+    name_schema text;
+    ATTRIBUTE_ID TEXT := '{attribute_id}';
+    ENTITY_ID_VALUE TEXT := '{entity_id}';
+    ATTR_VALUE TEXT := '{value}';
+BEGIN
+    FOR name, name_schema IN
+        SELECT table_name, table_schema
+        FROM information_schema.columns
+        WHERE column_name = 'entity_id'
+        AND table_name IN (SELECT table_name FROM information_schema.columns WHERE column_name = 'attr_' || ATTRIBUTE_ID)
+    LOOP    
+        EXECUTE format('INSERT INTO %I.%I (id, entity_id, \"attr_%s\") VALUES (%L, %L, %L) ON CONFLICT (id) DO UPDATE SET \"attr_%s\" = EXCLUDED.\"attr_%s\"', name_schema, name, ATTRIBUTE_ID, ENTITY_ID_VALUE, ENTITY_ID_VALUE, ATTR_VALUE, ATTRIBUTE_ID, ATTRIBUTE_ID);
+    END LOOP;
+END $$;
+");
+        let result = db.execute(Statement::from_string(
+            DbBackend::Postgres,
+            bulk_insert,
+        ))
+        .await;
+
+        if let Err(err) = result {
+            println!("\n\n\n\n Error inserting triple data: {:?}\n\n\n\n", err);
+            sleep(Duration::from_millis(1500)).await;
         }
         Ok(())
     }

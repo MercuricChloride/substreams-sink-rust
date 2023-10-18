@@ -2,7 +2,7 @@ use anyhow::Error;
 use sea_orm::{ConnectionTrait, DatabaseTransaction};
 
 use crate::{
-    models::spaces::{upsert_cover, self},
+    models::spaces::{self, upsert_cover},
     sink_actions::{ActionDependencies, SinkAction, SinkActionDependency as Dep},
 };
 
