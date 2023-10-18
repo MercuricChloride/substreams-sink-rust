@@ -164,26 +164,34 @@ impl ActionDependencies for TableAction<'_> {
                 entity_id,
             } => {
                 if *type_id != Entities::SchemaType.id() {
-                    Some(vec![
-                        // SinkActionDependency::IsType { type_id: entity_id.to_string() },
-                        SinkActionDependency::IsType { type_id: type_id.to_string() },
-                    ])
+                    Some(vec![SinkActionDependency::IsType {
+                        type_id: type_id.to_string(),
+                    }])
                 } else {
-                    Some(vec![SinkActionDependency::IsType { type_id: type_id.to_string() }])
+                    None
                 }
+//  else {
+                //     Some(vec![SinkActionDependency::IsType {
+                //         type_id: type_id.to_string(),
+                //     }])
+                // }
             }
             TableAction::AttributeAdded {
                 space,
                 entity_id,
                 attribute_id,
             } => Some(vec![
-                SinkActionDependency::IsType { type_id: entity_id.to_string() },
+                SinkActionDependency::IsType {
+                    type_id: entity_id.to_string(),
+                },
                 SinkActionDependency::IsAttribute {
                     entity_id: attribute_id.to_string(),
                 },
             ]),
             TableAction::SpaceCreated { entity_id, .. } => {
-                Some(vec![SinkActionDependency::Exists { entity_id: entity_id.to_string() }])
+                Some(vec![SinkActionDependency::Exists {
+                    entity_id: entity_id.to_string(),
+                }])
             }
             TableAction::ValueTypeAdded {
                 space,
@@ -191,7 +199,9 @@ impl ActionDependencies for TableAction<'_> {
                 attribute_id,
                 value_type,
             } => Some(vec![
-                SinkActionDependency::Exists { entity_id: entity_id.to_string() },
+                SinkActionDependency::Exists {
+                    entity_id: entity_id.to_string(),
+                },
                 // SinkActionDependency::Exists {
                 //     entity_id: attribute_id,
                 // },

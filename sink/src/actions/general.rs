@@ -87,7 +87,9 @@ impl ActionDependencies for GeneralAction<'_> {
                 value,
                 author,
             } => Some(vec![
-                Dep::Exists { entity_id: entity_id.to_string() },
+                Dep::Exists {
+                    entity_id: entity_id.to_string(),
+                },
                 Dep::Exists {
                     entity_id: attribute_id.to_string(),
                 },

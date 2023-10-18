@@ -58,7 +58,14 @@ impl ActionDependencies for SpaceAction<'_> {
                 space,
                 entity_id,
                 cover_image,
-            } => Some(vec![Dep::Exists { entity_id: entity_id.to_string() }, Dep::IsSpace { entity_id: entity_id.to_string() }]),
+            } => Some(vec![
+                Dep::Exists {
+                    entity_id: entity_id.to_string(),
+                },
+                Dep::IsSpace {
+                    entity_id: entity_id.to_string(),
+                },
+            ]),
             SpaceAction::SubspaceAdded {
                 parent_space,
                 child_space,

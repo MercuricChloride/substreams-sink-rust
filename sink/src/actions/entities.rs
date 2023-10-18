@@ -69,17 +69,23 @@ impl ActionDependencies for EntityAction<'_> {
                 space,
                 entity_id,
                 avatar_image,
-            } => Some(vec![Dep::Exists { entity_id: entity_id.to_string() }]),
+            } => Some(vec![Dep::Exists {
+                entity_id: entity_id.to_string(),
+            }]),
             EntityAction::NameAdded {
                 space,
                 entity_id,
                 name,
-            } => Some(vec![Dep::Exists { entity_id: entity_id.to_string() }]),
+            } => Some(vec![Dep::Exists {
+                entity_id: entity_id.to_string(),
+            }]),
             EntityAction::DescriptionAdded {
                 space,
                 entity_id,
                 description,
-            } => Some(vec![Dep::Exists { entity_id: entity_id.to_string() }]),
+            } => Some(vec![Dep::Exists {
+                entity_id: entity_id.to_string(),
+            }]),
         }
     }
 

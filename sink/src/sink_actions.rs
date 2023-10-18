@@ -124,6 +124,7 @@ impl<'a> SinkActionDependency {
         }
     }
 
+    #[deprecated = "Complexity not worth speed improvement"]
     pub async fn met(
         &self,
         map: &mut HashMap<Self, bool>,
@@ -187,10 +188,14 @@ impl<'a> SinkActionDependency {
                 } = action
                 {
                     if type_id == &Entities::SchemaType.id() {
-                        return Some(SinkActionDependency::IsType { type_id: entity_id.to_string() });
+                        return Some(SinkActionDependency::IsType {
+                            type_id: entity_id.to_string(),
+                        });
                     }
                     if type_id == &Entities::Attribute.id() {
-                        return Some(SinkActionDependency::IsAttribute { entity_id: entity_id.to_string() });
+                        return Some(SinkActionDependency::IsAttribute {
+                            entity_id: entity_id.to_string(),
+                        });
                     }
                 }
             }
@@ -201,7 +206,9 @@ impl<'a> SinkActionDependency {
                     author,
                 } = action
                 {
-                    return Some(SinkActionDependency::Exists { entity_id: entity_id.to_string() });
+                    return Some(SinkActionDependency::Exists {
+                        entity_id: entity_id.to_string(),
+                    });
                 }
             }
             _ => {}

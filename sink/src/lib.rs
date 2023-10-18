@@ -273,7 +273,7 @@ async fn try_action<'a>(
     // These denote the first tier of actions to handle in the DB(things that have no deps)
     let mut first_actions: FuturesUnordered<_> = FuturesUnordered::new();
     // These denote the second tier of actions to handle in the DB(fallback actions)
-    let mut second_actions: FuturesUnordered<_> = FuturesUnordered::new();
+    //let mut second_actions: FuturesUnordered<_> = FuturesUnordered::new();
     // These denote the third tier of actions to handle in the DB(actions with deps that should be handled in tier 1 or 2)
     let mut third_actions: FuturesUnordered<_> = FuturesUnordered::new();
     //let initial_len = actions.len();
@@ -325,18 +325,22 @@ async fn try_action<'a>(
                 let mut filtered_dependencies = vec![];
 
                 for dep in dependencies.iter() {
-                    let is_met = dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
-                    if !is_met {
+                    //let is_met = dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
+                    //if !is_met {
                         filtered_dependencies.push(dep);
-                    }
+                    //}
                 }
 
                 let flat_dependencies: Vec<_> = filtered_dependencies
                     .iter()
-                    .flat_map(|dep| dep.fallback_actions(author.into(), space.into()).unwrap_or(vec![]))
+                    .flat_map(|dep| {
+                        dep.fallback_actions(author.into(), space.into())
+                            .unwrap_or(vec![])
+                    })
                     .collect();
 
                 for action in flat_dependencies {
+                    println!("executing fallback dependency {action:?}");
                     let cloned = action.clone();
                     if let Some(as_dep) = SinkActionDependency::match_action(&action) {
                         let is_met = as_dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
@@ -345,7 +349,6 @@ async fn try_action<'a>(
                             cloned.execute(&first_txn, use_space_queries).await?;
                         }
                     }
-
                 }
             }
         } else {
@@ -365,13 +368,13 @@ async fn try_action<'a>(
 
             let sub_tx = first_txn.begin().await?;
             let move_action = action.clone();
-            second_actions.push(async move {
+            //second_actions.push(async move {
                 move_action
                     .execute(&sub_tx, use_space_queries)
                     .await
                     .unwrap();
-                sub_tx.commit().await
-            });
+                sub_tx.commit().await?;
+            //});
 
             if let Some(dep) = SinkActionDependency::match_action(&action) {
                 dependency_nodes.insert(dep, true);
@@ -396,14 +399,14 @@ async fn try_action<'a>(
         }
     }
 
-    while let Some(result) = second_actions.next().await {
-        if let Err(err) = result {
-            println!("Error handling sink actions: {:?}", err);
-            return Err(err.into());
-        } else {
-            println!("Handled second action nbd brah");
-        }
-    }
+    // while let Some(result) = second_actions.next().await {
+    //     if let Err(err) = result {
+    //         println!("Error handling sink actions: {:?}", err);
+    //         return Err(err.into());
+    //     } else {
+    //         println!("Handled second action nbd brah");
+    //     }
+    // }
 
     while let Some(result) = third_actions.next().await {
         if let Err(err) = result {
@@ -598,7 +601,7 @@ mod tests {
             36472425
             //39251292
         };
-        //let start_block = 37673931;
+        //let start_block = 39861924;
 
         let stop_block: u64 = cursor::get_block_number(&db)
             .await
