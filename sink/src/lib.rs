@@ -577,12 +577,12 @@ mod tests {
         let start_block = 36472425;
         // let start_block = 41110218;
 
-        let stop_block: u64 = cursor::get_block_number(&db)
-            .await
-            .unwrap()
-            .unwrap()
-            .parse()
-            .unwrap();
+        // let stop_block: u64 = cursor::get_block_number(&db)
+        //     .await
+        //     .unwrap()
+        //     .unwrap()
+        //     .parse()
+        //     .unwrap();
 
         let entries = std::fs::read_dir("../action_cache").unwrap();
         let entries: Vec<_> = entries.filter_map(Result::ok).collect();
