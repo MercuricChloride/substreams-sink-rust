@@ -51,29 +51,29 @@ impl SpaceAction<'_> {
     }
 }
 
-impl<'a> ActionDependencies<'a> for SpaceAction<'a> {
-    fn dependencies(&self) -> Option<Vec<Dep<'a>>> {
+impl ActionDependencies for SpaceAction<'_> {
+    fn dependencies(&self) -> Option<Vec<Dep>> {
         match self {
             SpaceAction::CoverAdded {
                 space,
                 entity_id,
                 cover_image,
-            } => Some(vec![Dep::Exists { entity_id }, Dep::IsSpace { entity_id }]),
+            } => Some(vec![Dep::Exists { entity_id: entity_id.to_string() }, Dep::IsSpace { entity_id: entity_id.to_string() }]),
             SpaceAction::SubspaceAdded {
                 parent_space,
                 child_space,
             } => Some(vec![
                 Dep::Exists {
-                    entity_id: parent_space,
+                    entity_id: parent_space.to_string(),
                 },
                 Dep::Exists {
-                    entity_id: child_space,
+                    entity_id: child_space.to_string(),
                 },
                 Dep::IsSpace {
-                    entity_id: parent_space,
+                    entity_id: parent_space.to_string(),
                 },
                 Dep::IsSpace {
-                    entity_id: child_space,
+                    entity_id: child_space.to_string(),
                 },
             ]),
             SpaceAction::SubspaceRemoved {
@@ -81,16 +81,16 @@ impl<'a> ActionDependencies<'a> for SpaceAction<'a> {
                 child_space,
             } => Some(vec![
                 Dep::Exists {
-                    entity_id: parent_space,
+                    entity_id: parent_space.to_string(),
                 },
                 Dep::Exists {
-                    entity_id: child_space,
+                    entity_id: child_space.to_string(),
                 },
                 Dep::IsSpace {
-                    entity_id: parent_space,
+                    entity_id: parent_space.to_string(),
                 },
                 Dep::IsSpace {
-                    entity_id: child_space,
+                    entity_id: child_space.to_string(),
                 },
             ]),
         }

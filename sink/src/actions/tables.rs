@@ -155,8 +155,8 @@ impl TableAction<'_> {
     }
 }
 
-impl<'a> ActionDependencies<'a> for TableAction<'a> {
-    fn dependencies(&self) -> Option<Vec<SinkActionDependency<'a>>> {
+impl ActionDependencies for TableAction<'_> {
+    fn dependencies(&self) -> Option<Vec<SinkActionDependency>> {
         match self {
             TableAction::TypeAdded {
                 type_id,
@@ -165,11 +165,11 @@ impl<'a> ActionDependencies<'a> for TableAction<'a> {
             } => {
                 if *type_id != Entities::SchemaType.id() {
                     Some(vec![
-                        SinkActionDependency::IsType { type_id: entity_id },
-                        SinkActionDependency::IsType { type_id },
+                        // SinkActionDependency::IsType { type_id: entity_id.to_string() },
+                        SinkActionDependency::IsType { type_id: type_id.to_string() },
                     ])
                 } else {
-                    Some(vec![SinkActionDependency::IsType { type_id }])
+                    Some(vec![SinkActionDependency::IsType { type_id: type_id.to_string() }])
                 }
             }
             TableAction::AttributeAdded {
@@ -177,13 +177,13 @@ impl<'a> ActionDependencies<'a> for TableAction<'a> {
                 entity_id,
                 attribute_id,
             } => Some(vec![
-                SinkActionDependency::IsType { type_id: entity_id },
+                SinkActionDependency::IsType { type_id: entity_id.to_string() },
                 SinkActionDependency::IsAttribute {
-                    entity_id: attribute_id,
+                    entity_id: attribute_id.to_string(),
                 },
             ]),
             TableAction::SpaceCreated { entity_id, .. } => {
-                Some(vec![SinkActionDependency::Exists { entity_id }])
+                Some(vec![SinkActionDependency::Exists { entity_id: entity_id.to_string() }])
             }
             TableAction::ValueTypeAdded {
                 space,
@@ -191,7 +191,7 @@ impl<'a> ActionDependencies<'a> for TableAction<'a> {
                 attribute_id,
                 value_type,
             } => Some(vec![
-                SinkActionDependency::Exists { entity_id },
+                SinkActionDependency::Exists { entity_id: entity_id.to_string() },
                 // SinkActionDependency::Exists {
                 //     entity_id: attribute_id,
                 // },

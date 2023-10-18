@@ -77,8 +77,8 @@ impl GeneralAction<'_> {
     }
 }
 
-impl<'a> ActionDependencies<'a> for GeneralAction<'a> {
-    fn dependencies(&self) -> Option<Vec<Dep<'a>>> {
+impl ActionDependencies for GeneralAction<'_> {
+    fn dependencies(&self) -> Option<Vec<Dep>> {
         match self {
             GeneralAction::TripleAdded {
                 space,
@@ -87,12 +87,12 @@ impl<'a> ActionDependencies<'a> for GeneralAction<'a> {
                 value,
                 author,
             } => Some(vec![
-                Dep::Exists { entity_id },
+                Dep::Exists { entity_id: entity_id.to_string() },
                 Dep::Exists {
-                    entity_id: attribute_id,
+                    entity_id: attribute_id.to_string(),
                 },
                 Dep::IsAttribute {
-                    entity_id: attribute_id,
+                    entity_id: attribute_id.to_string(),
                 },
             ]),
             GeneralAction::TripleDeleted {

@@ -62,24 +62,24 @@ impl EntityAction<'_> {
     }
 }
 
-impl<'a> ActionDependencies<'a> for EntityAction<'a> {
-    fn dependencies(&self) -> Option<Vec<Dep<'a>>> {
+impl ActionDependencies for EntityAction<'_> {
+    fn dependencies(&self) -> Option<Vec<Dep>> {
         match self {
             EntityAction::AvatarAdded {
                 space,
                 entity_id,
                 avatar_image,
-            } => Some(vec![Dep::Exists { entity_id }]),
+            } => Some(vec![Dep::Exists { entity_id: entity_id.to_string() }]),
             EntityAction::NameAdded {
                 space,
                 entity_id,
                 name,
-            } => Some(vec![Dep::Exists { entity_id }]),
+            } => Some(vec![Dep::Exists { entity_id: entity_id.to_string() }]),
             EntityAction::DescriptionAdded {
                 space,
                 entity_id,
                 description,
-            } => Some(vec![Dep::Exists { entity_id }]),
+            } => Some(vec![Dep::Exists { entity_id: entity_id.to_string() }]),
         }
     }
 

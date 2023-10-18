@@ -268,7 +268,7 @@ async fn try_action<'a>(
     author: &str,
     space: &str,
 ) -> Result<(), Error> {
-    let mut actions: VecDeque<SinkAction<'_>> = actions.into();
+    let mut actions: VecDeque<SinkAction<'a>> = actions.into();
     let mut waiting_queue: VecDeque<SinkAction<'_>> = VecDeque::new();
     // These denote the first tier of actions to handle in the DB(things that have no deps)
     let mut first_actions: FuturesUnordered<_> = FuturesUnordered::new();
@@ -279,9 +279,9 @@ async fn try_action<'a>(
     //let initial_len = actions.len();
 
     // Contains a map from a Sink Action Dependency to a boolean indicating whether or not the dependency has been met
-    let mut dependency_nodes: HashMap<SinkActionDependency<'_>, bool> = HashMap::new();
+    let mut dependency_nodes: HashMap<SinkActionDependency, bool> = HashMap::new();
     // Contains tuples of (Action, DependentAction)
-    let mut dependency_edges: Vec<(SinkAction<'_>, SinkActionDependency<'_>)> = Vec::new();
+    let mut dependency_edges: Vec<(SinkAction<'_>, SinkActionDependency)> = Vec::new();
 
     let first_txn = db
         .begin_with_config(Some(IsolationLevel::ReadCommitted), None)
@@ -322,18 +322,30 @@ async fn try_action<'a>(
 
         if action.has_fallback() {
             if let Some(dependencies) = dependencies {
-                let flat_dependencies: Vec<_> = dependencies
+                let mut filtered_dependencies = vec![];
+
+                for dep in dependencies.iter() {
+                    let is_met = dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
+                    if !is_met {
+                        filtered_dependencies.push(dep);
+                    }
+                }
+
+                let flat_dependencies: Vec<_> = filtered_dependencies
                     .iter()
-                    .flat_map(|dep| dep.fallback_actions(author, space).unwrap_or(vec![]))
+                    .flat_map(|dep| dep.fallback_actions(author.into(), space.into()).unwrap_or(vec![]))
                     .collect();
 
                 for action in flat_dependencies {
                     let cloned = action.clone();
-                    cloned.execute(&first_txn, use_space_queries).await?;
+                    if let Some(as_dep) = SinkActionDependency::match_action(&action) {
+                        let is_met = as_dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
+                        if !is_met {
+                            dependency_nodes.insert(as_dep, true);
+                            cloned.execute(&first_txn, use_space_queries).await?;
+                        }
+                    }
 
-                    // if let Some(as_dep) = SinkActionDependency::match_action(&action) {
-                    //     dependency_nodes.insert(as_dep, true);
-                    // }
                 }
             }
         } else {

@@ -49,37 +49,42 @@ pub enum SinkAction<'a> {
 /// This enum represents the different dependencies that a sink action can have.
 /// For example, if an entity is given a "types" of "person", that "person" entity needs
 /// to have a "types" of "type", otherwise the graph will be inconsistent.
-#[derive(PartialEq, Debug, Eq, Hash, Copy, Clone)]
-pub enum SinkActionDependency<'a> {
+#[derive(PartialEq, Debug, Eq, Hash, Clone)]
+pub enum SinkActionDependency {
     /// Indicates this action requires a type entity to be created
-    IsType { type_id: &'a str },
+    IsType { type_id: String },
 
     /// Indicates this action requries something to have an "types" of "Attribute"
-    IsAttribute { entity_id: &'a str },
+    IsAttribute { entity_id: String },
 
     /// Indicates entity_id must be a space
-    IsSpace { entity_id: &'a str },
+    IsSpace { entity_id: String },
 
     /// Indicates the entity_id must exist
-    Exists { entity_id: &'a str },
+    Exists { entity_id: String },
 
     /// Indicates the value_type of the attribute must be the given value_type
     ValueTypeMatches {
-        attribute_id: &'a str,
-        value_type: &'a str,
+        attribute_id: String,
+        value_type: String,
     },
 }
 
-impl<'a> SinkActionDependency<'a> {
-    pub fn fallback_actions(
-        &'a self,
-        author: &'a str,
-        space: &'a str,
+impl<'a> SinkActionDependency {
+    pub fn fallback_actions<'b>(
+        &'b self,
+        author: &'b str,
+        space: &'b str,
     ) -> Option<Vec<SinkAction<'_>>> {
         match self {
             SinkActionDependency::IsType { type_id } => {
                 // if the type is not a type, we need to add the type
                 Some(vec![
+                    SinkAction::Table(TableAction::TypeAdded {
+                        space,
+                        entity_id: type_id,
+                        type_id: Entities::SchemaType.id(),
+                    }),
                     SinkAction::General(GeneralAction::TripleAdded {
                         space,
                         entity_id: type_id,
@@ -89,14 +94,14 @@ impl<'a> SinkActionDependency<'a> {
                         },
                         author,
                     }),
-                    SinkAction::Table(TableAction::TypeAdded {
-                        space,
-                        entity_id: type_id,
-                        type_id: Entities::SchemaType.id(),
-                    }),
                 ])
             }
             SinkActionDependency::IsAttribute { entity_id } => Some(vec![
+                SinkAction::Table(TableAction::TypeAdded {
+                    space,
+                    entity_id,
+                    type_id: Entities::Attribute.id(),
+                }),
                 SinkAction::General(GeneralAction::TripleAdded {
                     space,
                     entity_id,
@@ -105,11 +110,6 @@ impl<'a> SinkActionDependency<'a> {
                         id: Entities::Attribute.id().into(),
                     },
                     author,
-                }),
-                SinkAction::Table(TableAction::TypeAdded {
-                    space,
-                    entity_id,
-                    type_id: Entities::Attribute.id(),
                 }),
             ]),
             SinkActionDependency::Exists { entity_id } => {
@@ -125,21 +125,23 @@ impl<'a> SinkActionDependency<'a> {
     }
 
     pub async fn met(
-        self,
+        &self,
         map: &mut HashMap<Self, bool>,
         db: &DatabaseTransaction,
     ) -> Result<bool, Error> {
-        Ok(match map.get(&self) {
+        Ok(match map.get_mut(&self) {
             Some(value) => {
                 if *value {
-                    false
+                    true
                 } else {
-                    self.met_in_db(db).await?
+                    let is_met = self.met_in_db(db).await?;
+                    *value = is_met;
+                    is_met
                 }
             }
             None => {
                 let met_in_db = self.met_in_db(db).await?;
-                map.insert(self, met_in_db);
+                map.insert(self.clone(), met_in_db);
                 met_in_db
             }
         })
@@ -175,7 +177,7 @@ impl<'a> SinkActionDependency<'a> {
     }
 
     /// This function checks if a sink_action is solving one of these dependencies
-    pub fn match_action(action: &SinkAction<'a>) -> Option<SinkActionDependency<'a>> {
+    pub fn match_action(action: &SinkAction<'a>) -> Option<SinkActionDependency> {
         match action {
             SinkAction::Table(action) => {
                 if let TableAction::TypeAdded {
@@ -185,10 +187,10 @@ impl<'a> SinkActionDependency<'a> {
                 } = action
                 {
                     if type_id == &Entities::SchemaType.id() {
-                        return Some(SinkActionDependency::IsType { type_id: entity_id });
+                        return Some(SinkActionDependency::IsType { type_id: entity_id.to_string() });
                     }
                     if type_id == &Entities::Attribute.id() {
-                        return Some(SinkActionDependency::IsAttribute { entity_id });
+                        return Some(SinkActionDependency::IsAttribute { entity_id: entity_id.to_string() });
                     }
                 }
             }
@@ -199,7 +201,7 @@ impl<'a> SinkActionDependency<'a> {
                     author,
                 } = action
                 {
-                    return Some(SinkActionDependency::Exists { entity_id });
+                    return Some(SinkActionDependency::Exists { entity_id: entity_id.to_string() });
                 }
             }
             _ => {}
@@ -208,15 +210,15 @@ impl<'a> SinkActionDependency<'a> {
     }
 }
 
-pub trait ActionDependencies<'a> {
+pub trait ActionDependencies {
     /// This function should return the dependencies of this action
-    fn dependencies(&self) -> Option<Vec<SinkActionDependency<'a>>>;
+    fn dependencies(&self) -> Option<Vec<SinkActionDependency>>;
     /// If this action has a fallback, this function should return true
     fn has_fallback(&self) -> bool;
 }
 
-impl<'a> ActionDependencies<'a> for SinkAction<'a> {
-    fn dependencies(&self) -> Option<Vec<SinkActionDependency<'a>>> {
+impl ActionDependencies for SinkAction<'_> {
+    fn dependencies(&self) -> Option<Vec<SinkActionDependency>> {
         match self {
             SinkAction::Table(table) => table.dependencies(),
             SinkAction::Space(space) => space.dependencies(),

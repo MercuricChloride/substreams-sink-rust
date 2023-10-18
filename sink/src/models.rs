@@ -13,8 +13,16 @@ END $$;
 ",
                         space = space,
                         entity_id = entity_id,
-                        entity_name = entity_name
+                        entity_name = escape(entity_name)
                     )
+}
+
+/// strips all non alphanumeric characters that aren't spaces
+pub fn escape(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
 }
 
 pub fn triple_exists_string(entity: &str, attribute: &str, value: &str) -> String {
@@ -504,6 +512,10 @@ pub mod entities {
                     }
 
                     let table_comment = table_comment_string(&space, &entity_id, &entity_name);
+                    println!("Table comment: {}", table_comment);
+                    if space.is_empty() || entity_id.is_empty() || entity_name.is_empty() {
+                        return Ok(());
+                    }
 
                     let result = db
                         .execute(Statement::from_string(
