@@ -1,16 +1,26 @@
+use std::collections::HashMap;
+use std::time::Duration;
+
 use crate::actions::entities::EntityAction;
 use crate::actions::general::GeneralAction;
 use crate::actions::spaces::SpaceAction;
 use crate::actions::tables::TableAction;
 use crate::constants;
+use crate::constants::Attributes;
+use crate::constants::Entities;
+use crate::models;
 use crate::models::*;
+use crate::triples::ActionTriple;
 use crate::triples::ValueType;
 use anyhow::Error;
 use futures03::{future::try_join_all, stream::FuturesOrdered};
 use migration::DbErr;
+use sea_orm::ColumnTrait;
 use sea_orm::ConnectionTrait;
 use sea_orm::DatabaseConnection;
 use sea_orm::DatabaseTransaction;
+use sea_orm::EntityTrait;
+use sea_orm::QueryFilter;
 use sea_orm::TransactionTrait;
 use strum::EnumIter;
 use tokio_stream::StreamExt;
@@ -28,49 +38,243 @@ use tokio_stream::StreamExt;
 ///
 /// The reason for this is just so we can keep track of what actions we have taken in the database.
 /// In addition to specific actions that should do special things, which are the rest of the variants.
-#[derive(Debug, Clone)]
-pub enum SinkAction {
-    Table(TableAction),
-    Space(SpaceAction),
-    Entity(EntityAction),
-    General(GeneralAction),
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum SinkAction<'a> {
+    Table(TableAction<'a>),
+    Space(SpaceAction<'a>),
+    Entity(EntityAction<'a>),
+    General(GeneralAction<'a>),
 }
 
-pub async fn handle_sink_actions(
-    actions: &Vec<SinkAction>,
-    txn: &DatabaseTransaction,
-    use_space_queries: bool,
-    max_connections: usize,
-) -> Result<(), Error> {
-    let mut futures = FuturesOrdered::new();
-    let mut chunk = Vec::new();
+/// This enum represents the different dependencies that a sink action can have.
+/// For example, if an entity is given a "types" of "person", that "person" entity needs
+/// to have a "types" of "type", otherwise the graph will be inconsistent.
+#[derive(PartialEq, Debug, Eq, Hash, Clone)]
+pub enum SinkActionDependency {
+    /// Indicates this action requires a type entity to be created
+    IsType { type_id: String },
 
-    for action in actions.iter() {
-        chunk.push(action.execute(txn, use_space_queries));
+    /// Indicates this action requries something to have an "types" of "Attribute"
+    IsAttribute { entity_id: String },
 
-        if chunk.len() == max_connections {
-            futures.push_back(try_join_all(chunk));
-            chunk = Vec::new();
+    /// Indicates entity_id must be a space
+    IsSpace { entity_id: String },
+
+    /// Indicates the entity_id must exist
+    Exists { entity_id: String },
+
+    /// Indicates the value_type of the attribute must be the given value_type
+    ValueTypeMatches {
+        attribute_id: String,
+        value_type: String,
+    },
+}
+
+impl<'a> SinkActionDependency {
+    pub fn fallback_actions<'b>(
+        &'b self,
+        author: &'b str,
+        space: &'b str,
+    ) -> Option<Vec<SinkAction<'_>>> {
+        match self {
+            SinkActionDependency::IsType { type_id } => {
+                // if the type is not a type, we need to add the type
+                Some(vec![
+                    SinkAction::Table(TableAction::TypeAdded {
+                        space,
+                        entity_id: type_id,
+                        type_id: Entities::SchemaType.id(),
+                    }),
+                    SinkAction::General(GeneralAction::TripleAdded {
+                        space,
+                        entity_id: type_id,
+                        attribute_id: Attributes::Type.id(),
+                        value: ValueType::Entity {
+                            id: Entities::SchemaType.id().to_string(),
+                        },
+                        author,
+                    }),
+                ])
+            }
+            SinkActionDependency::IsAttribute { entity_id } => Some(vec![
+                SinkAction::Table(TableAction::TypeAdded {
+                    space,
+                    entity_id,
+                    type_id: Entities::Attribute.id(),
+                }),
+                SinkAction::General(GeneralAction::TripleAdded {
+                    space,
+                    entity_id,
+                    attribute_id: Attributes::Type.id(),
+                    value: ValueType::Entity {
+                        id: Entities::Attribute.id().into(),
+                    },
+                    author,
+                }),
+            ]),
+            SinkActionDependency::Exists { entity_id } => {
+                Some(vec![SinkAction::General(GeneralAction::EntityCreated {
+                    space,
+                    entity_id,
+                    author,
+                })])
+            }
+            SinkActionDependency::ValueTypeMatches { .. }
+            | SinkActionDependency::IsSpace { .. } => None,
         }
     }
 
-    if !chunk.is_empty() {
-        futures.push_back(try_join_all(chunk));
+    #[deprecated = "Complexity not worth speed improvement"]
+    pub async fn met(
+        &self,
+        map: &mut HashMap<Self, bool>,
+        db: &DatabaseTransaction,
+    ) -> Result<bool, Error> {
+        Ok(match map.get_mut(&self) {
+            Some(value) => {
+                if *value {
+                    true
+                } else {
+                    let is_met = self.met_in_db(db).await?;
+                    *value = is_met;
+                    is_met
+                }
+            }
+            None => {
+                let met_in_db = self.met_in_db(db).await?;
+                map.insert(self.clone(), met_in_db);
+                met_in_db
+            }
+        })
     }
 
-    while let Some(result) = futures.next().await {
-        result?;
+    pub async fn met_in_db(&self, db: &DatabaseTransaction) -> Result<bool, Error> {
+        Ok(match &self {
+            SinkActionDependency::IsType { type_id } => {
+                triples::exists(
+                    db,
+                    type_id,
+                    Attributes::Type.id(),
+                    Entities::SchemaType.id(),
+                )
+                .await?
+            }
+            SinkActionDependency::IsAttribute { entity_id } => {
+                triples::exists(
+                    db,
+                    entity_id,
+                    Attributes::Type.id(),
+                    Entities::Attribute.id(),
+                )
+                .await?
+            }
+            SinkActionDependency::IsSpace { entity_id } => spaces::exists(db, entity_id).await?,
+            SinkActionDependency::Exists { entity_id } => entities::exists(db, entity_id).await?,
+            SinkActionDependency::ValueTypeMatches {
+                attribute_id,
+                value_type,
+            } => triples::exists(db, attribute_id, Attributes::ValueType.id(), value_type).await?,
+        })
     }
 
-    Ok(())
+    /// This function checks if a sink_action is solving one of these dependencies
+    pub fn match_action(action: &SinkAction<'a>) -> Option<SinkActionDependency> {
+        match action {
+            SinkAction::Table(action) => {
+                if let TableAction::TypeAdded {
+                    space,
+                    entity_id,
+                    type_id,
+                } = action
+                {
+                    if type_id == &Entities::SchemaType.id() {
+                        return Some(SinkActionDependency::IsType {
+                            type_id: entity_id.to_string(),
+                        });
+                    }
+                    if type_id == &Entities::Attribute.id() {
+                        return Some(SinkActionDependency::IsAttribute {
+                            entity_id: entity_id.to_string(),
+                        });
+                    }
+                }
+            }
+            SinkAction::General(action) => {
+                if let GeneralAction::EntityCreated {
+                    space,
+                    entity_id,
+                    author,
+                } = action
+                {
+                    return Some(SinkActionDependency::Exists {
+                        entity_id: entity_id.to_string(),
+                    });
+                }
+            }
+            _ => {}
+        }
+        None
+    }
 }
 
-impl SinkAction {
-    pub async fn execute(
-        &self,
-        db: &impl ConnectionTrait,
-        space_queries: bool,
-    ) -> Result<(), Error> {
+pub trait ActionDependencies {
+    /// This function should return the dependencies of this action
+    fn dependencies(&self) -> Option<Vec<SinkActionDependency>>;
+    /// If this action has a fallback, this function should return true
+    fn has_fallback(&self) -> bool;
+}
+
+impl ActionDependencies for SinkAction<'_> {
+    fn dependencies(&self) -> Option<Vec<SinkActionDependency>> {
+        match self {
+            SinkAction::Table(table) => table.dependencies(),
+            SinkAction::Space(space) => space.dependencies(),
+            SinkAction::Entity(entity) => entity.dependencies(),
+            SinkAction::General(general) => general.dependencies(),
+        }
+    }
+
+    fn has_fallback(&self) -> bool {
+        match self {
+            SinkAction::Table(table) => table.has_fallback(),
+            SinkAction::Space(space) => space.has_fallback(),
+            SinkAction::Entity(entity) => entity.has_fallback(),
+            SinkAction::General(general) => general.has_fallback(),
+        }
+    }
+}
+
+// pub async fn handle_sink_actions(
+//     actions: Vec<SinkAction<'_>>,
+//     txn: &DatabaseTransaction,
+//     use_space_queries: bool,
+//     max_connections: usize,
+// ) -> Result<(), Error> {
+//     let mut futures = FuturesOrdered::new();
+//     let mut chunk = Vec::new();
+
+//     for action in actions.into_iter() {
+//         chunk.push(action.execute(txn, use_space_queries));
+
+//         if chunk.len() == max_connections {
+//             futures.push_back(try_join_all(chunk));
+//             chunk = Vec::new();
+//         }
+//     }
+
+//     if !chunk.is_empty() {
+//         futures.push_back(try_join_all(chunk));
+//     }
+
+//     while let Some(result) = futures.next().await {
+//         result?;
+//     }
+
+//     Ok(())
+// }
+
+impl<'a> SinkAction<'a> {
+    pub async fn execute(self, db: &DatabaseTransaction, space_queries: bool) -> Result<(), Error> {
         match self {
             SinkAction::Table(action) => action.execute(db, space_queries).await,
             SinkAction::Entity(action) => action.execute(db, space_queries).await,
@@ -99,7 +303,30 @@ impl SinkAction {
             SinkAction::General(_) => 1,
             SinkAction::Entity(_) => 2,
             SinkAction::Space(_) => 3,
-            SinkAction::Table(_) => 4,
+            SinkAction::Table(action) => match action {
+                TableAction::SpaceCreated {
+                    entity_id,
+                    space,
+                    created_in_space,
+                    author,
+                } => 5,
+                TableAction::TypeAdded {
+                    space,
+                    entity_id,
+                    type_id,
+                } => 6,
+                TableAction::ValueTypeAdded {
+                    space,
+                    entity_id,
+                    attribute_id,
+                    value_type,
+                } => 7,
+                TableAction::AttributeAdded {
+                    space,
+                    entity_id,
+                    attribute_id,
+                } => 8,
+            },
         }
     }
 }

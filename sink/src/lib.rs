@@ -1,10 +1,12 @@
 use crate::pb::schema::EntriesAdded;
-use crate::sink_actions::handle_sink_actions;
+use crate::sink_actions::ActionDependencies;
 use crate::triples::Action;
 use anyhow::{format_err, Context, Error};
 use clap::Parser;
 use commands::Args;
 use dotenv::dotenv;
+use futures03::stream::FuturesUnordered;
+use futures03::Future;
 use futures03::{
     future::{join_all, try_join_all},
     stream::FuturesOrdered,
@@ -17,12 +19,16 @@ use pb::sf::substreams::{
     v1::Package,
 };
 use prost::Message;
-use sea_orm::{ConnectOptions, ConnectionTrait, DatabaseTransaction, TransactionTrait};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, DatabaseTransaction, IsolationLevel, TransactionTrait,
+};
 use sea_orm::{Database, DatabaseConnection};
-use sink_actions::SinkAction;
+use sink_actions::{SinkAction, SinkActionDependency};
+use std::collections::{HashMap, VecDeque};
 use std::{sync::Arc, time::Duration};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
+use tokio::sync::RwLock;
 use tokio::{
     sync::mpsc::{channel, Sender},
     time::Instant,
@@ -34,7 +40,6 @@ pub mod commands;
 pub mod constants;
 pub mod models;
 pub mod pb;
-pub mod persist;
 pub mod retry;
 pub mod sink_actions;
 pub mod substreams;
@@ -72,7 +77,7 @@ pub async fn main() -> Result<(), Error> {
 
     // bootstrap the database
     #[cfg(not(feature = "no_db_sync"))]
-    bootstrap(&db).await?;
+    bootstrap(db.clone()).await?;
 
     let cursor: Option<String> = cursor::get(&db).await?;
 
@@ -86,7 +91,7 @@ pub async fn main() -> Result<(), Error> {
     );
 
     // spawn a concurrent process to handle the substream data
-    let (tx, mut rx) = channel::<Action>(10000);
+    let (tx, mut rx) = channel::<Box<Action>>(10000);
 
     #[cfg(not(feature = "no_db_sync"))]
     let receiver_task = async {
@@ -104,7 +109,7 @@ pub async fn main() -> Result<(), Error> {
             println!("Processing entry");
 
             handle_action(
-                action,
+                *action,
                 db.clone(),
                 use_space_queries,
                 max_connections as usize,
@@ -117,7 +122,6 @@ pub async fn main() -> Result<(), Error> {
     };
 
     let stream_task = async {
-        let tx = tx;
         loop {
             match stream.next().await {
                 None => {
@@ -129,7 +133,8 @@ pub async fn main() -> Result<(), Error> {
                         if let Some(map_output) = &output.map_output {
                             let block_number = data.clock.as_ref().unwrap().number;
                             println!("Processing block {}", block_number);
-                            let value = EntriesAdded::decode(map_output.value.as_slice())?;
+                            let value = EntriesAdded::decode(map_output.value.as_slice()).unwrap();
+                            let tx = tx.clone();
                             // if the block is empty, store the cursor and set the flag to false
                             if value.entries.len() == 0 {
                                 cursor::store(&db, data.cursor.clone(), block_number).await?;
@@ -139,7 +144,18 @@ pub async fn main() -> Result<(), Error> {
                                     block_number,
                                     value.entries.len()
                                 );
-                                process_block_scoped_data(value, data, db.clone(), &tx).await?;
+                                async move {
+                                    let futures: Vec<_> = value
+                                        .entries
+                                        .into_iter()
+                                        .map(|entry| Action::decode_from_entry(entry))
+                                        .collect();
+                                    let actions = try_join_all(futures).await.unwrap();
+                                    for action in actions {
+                                        tx.send(Box::new(action)).await;
+                                    }
+                                }
+                                .await;
                             }
                         }
                     }
@@ -169,50 +185,49 @@ pub async fn main() -> Result<(), Error> {
     }
 }
 
-async fn process_block_scoped_data(
+async fn process_block_scoped_data<'a>(
     value: EntriesAdded,
     data: BlockScopedData,
     db: Arc<DatabaseConnection>,
-    sender: &Sender<Action>,
+    sender: &'a Sender<Box<Action>>,
 ) -> Result<(), Error> {
-    let entries = value.entries;
-    let block_number = data.clock.as_ref().unwrap().number;
+    // let block_number = data.clock.as_ref().unwrap().number;
 
-    println!("Getting actions for block {}", block_number);
-    let actions = join_all(entries.iter().map(|entry| async move {
-        (
-            Action::decode_from_entry(entry).await,
-            entry.author.clone(),
-            entry.space.clone(),
-        )
-    }))
-    .await;
-    println!("Actions retrieved");
+    // println!("Getting actions for block {}", block_number);
 
-    for (i, (action, author, space)) in actions.into_iter().enumerate() {
-        match action {
-            Ok(action) => {
-                #[cfg(feature = "no_db_sync")]
-                {
-                    let file_path =
-                        format!("./action_cache/{block_number}_{i}_{space}_{author}.json");
-                    std::fs::write(&file_path, serde_json::to_string(&action).unwrap()).unwrap();
-                    println!("Wrote action to file");
-                }
+    // let actions = value
+    //     .entries
+    //     .into_iter()
+    //     .map(|entry| {
+    //         let action = Action::from_entry(entry);
+    //         Box::new(action) as Box<Action<'_>>
+    //     })
+    //     .collect::<Vec<_>>();
 
-                #[cfg(not(feature = "no_db_sync"))]
-                sender.send(action).await?
-            }
-            Err(err) => {
-                println!("Error getting action: {:?}", err);
-                continue;
-            }
-        }
-    }
+    // for (i, (action, author, space)) in actions.into_iter().enumerate() {
+    //     match action {
+    //         Ok(action) => {
+    //             #[cfg(feature = "no_db_sync")]
+    //             {
+    //                 let file_path =
+    //                     format!("./action_cache/{block_number}_{i}_{space}_{author}.json");
+    //                 std::fs::write(&file_path, serde_json::to_string(&action).unwrap()).unwrap();
+    //                 println!("Wrote action to file");
+    //             }
 
-    println!("Actions sent");
+    //             #[cfg(not(feature = "no_db_sync"))]
+    //             sender.send(action).await?
+    //         }
+    //         Err(err) => {
+    //             println!("Error getting action: {:?}", err);
+    //             continue;
+    //         }
+    //     }
+    // }
 
-    cursor::store(&db, data.cursor, block_number).await?;
+    // println!("Actions sent");
+
+    // cursor::store(&db, data.cursor, block_number).await?;
 
     Ok(())
 }
@@ -225,92 +240,230 @@ async fn handle_action(
     use_space_queries: bool,
     max_connections: usize,
 ) -> Result<(), Error> {
-    action
-        .execute_action_triples(&db, use_space_queries, max_connections)
-        .await?;
-    println!("Action triples added to db");
-
-    action.add_author_to_db(&db).await?;
-    println!("Author added to db");
-
     let sink_actions = if use_space_queries {
         action.get_sink_actions()
     } else {
         action.get_global_sink_actions()
     };
 
-    let mut default_actions = Vec::new();
-    let mut optional_actions = Vec::new();
+    let txn = db.begin().await?;
 
-    for (default, optional) in sink_actions.into_iter() {
-        default_actions.push(default);
-        if let Some(optional) = optional {
-            optional_actions.push(optional);
+    action
+        .execute_action_triples(&txn, use_space_queries, max_connections)
+        .await?;
+    action.add_author_to_db(&txn).await?;
+    txn.commit().await?;
+
+    let space = &action.space;
+    let author = &action.author;
+
+    try_action(sink_actions, db, use_space_queries, author, space).await?;
+    Ok(())
+}
+
+async fn try_action<'a>(
+    actions: Vec<SinkAction<'a>>,
+    db: Arc<DatabaseConnection>,
+    use_space_queries: bool,
+    author: &str,
+    space: &str,
+) -> Result<(), Error> {
+    let mut actions: VecDeque<SinkAction<'a>> = actions.into();
+    let mut waiting_queue: VecDeque<SinkAction<'_>> = VecDeque::new();
+    // These denote the first tier of actions to handle in the DB(things that have no deps)
+    let mut first_actions: FuturesUnordered<_> = FuturesUnordered::new();
+    // These denote the second tier of actions to handle in the DB(fallback actions)
+    //let mut second_actions: FuturesUnordered<_> = FuturesUnordered::new();
+    // These denote the third tier of actions to handle in the DB(actions with deps that should be handled in tier 1 or 2)
+    let mut third_actions: FuturesUnordered<_> = FuturesUnordered::new();
+    //let initial_len = actions.len();
+
+    // Contains a map from a Sink Action Dependency to a boolean indicating whether or not the dependency has been met
+    let mut dependency_nodes: HashMap<SinkActionDependency, bool> = HashMap::new();
+    // Contains tuples of (Action, DependentAction)
+    let mut dependency_edges: Vec<(SinkAction<'_>, SinkActionDependency)> = Vec::new();
+
+    let first_txn = db
+        .begin_with_config(Some(IsolationLevel::ReadCommitted), None)
+        .await?;
+
+    while let Some(action) = actions.pop_front() {
+        if let Some(_) = action.dependencies() {
+            waiting_queue.push_back(action);
+        } else {
+            // if something doesn't have dependencies, we can push it directly to the first_actions queue
+            let sub_tx = first_txn.begin().await?;
+            let move_action = action.clone();
+            first_actions.push(async move {
+                move_action
+                    .execute(&sub_tx, use_space_queries)
+                    .await
+                    .unwrap();
+                sub_tx.commit().await
+            });
         }
     }
 
-    optional_actions.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
+    while let Some(result) = first_actions.next().await {
+        if let Err(err) = result {
+            println!("Error handling sink actions: {:?}", err);
+            return Err(err.into());
+        } else {
+            println!("Handled first action nbd brah");
+        }
+    }
 
-    let max_failures = 4;
+    while let Some(action) = waiting_queue.pop_front() {
+        let mut dependencies_met = true;
 
-    let txn = db.begin().await?;
-    try_execute(
-        &default_actions,
-        txn,
-        use_space_queries,
-        max_connections,
-        max_failures,
-    )
-    .await?;
-    println!("Default actions handled");
+        println!("Checking fallback actions for: {action:?}");
+        // Fallback actions are the default actions that should be executed
+        let dependencies = action.dependencies();
 
-    let txn = db.begin().await?;
-    try_execute(
-        &optional_actions,
-        txn,
-        use_space_queries,
-        max_connections,
-        max_failures,
-    )
-    .await?;
-    println!("Optional actions handled");
+        if action.has_fallback() {
+            if let Some(dependencies) = dependencies {
+                let mut filtered_dependencies = vec![];
+
+                for dep in dependencies.iter() {
+                    //let is_met = dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
+                    //if !is_met {
+                    filtered_dependencies.push(dep);
+                    //}
+                }
+
+                let flat_dependencies: Vec<_> = filtered_dependencies
+                    .iter()
+                    .flat_map(|dep| {
+                        dep.fallback_actions(author.into(), space.into())
+                            .unwrap_or(vec![])
+                    })
+                    .collect();
+
+                for action in flat_dependencies {
+                    println!("executing fallback dependency {action:?}");
+                    let cloned = action.clone();
+                    if let Some(as_dep) = SinkActionDependency::match_action(&action) {
+                        let is_met = as_dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
+                        if !is_met {
+                            dependency_nodes.insert(as_dep, true);
+                            cloned.execute(&first_txn, use_space_queries).await?;
+                        }
+                    }
+                }
+            }
+        } else {
+            if let Some(dependencies) = dependencies {
+                // handle the dependencies
+                for dep in dependencies {
+                    if !dep.met(&mut dependency_nodes, &first_txn).await? {
+                        // println!("Dependency {:?} not met for action: {:?}", dep, action);
+                        dependencies_met = false;
+                    }
+                }
+            }
+        }
+
+        if dependencies_met {
+            println!("Executing waiting list action: {:?}", action);
+
+            let sub_tx = first_txn.begin().await?;
+            let move_action = action.clone();
+            //second_actions.push(async move {
+            if let Ok(_) = move_action.execute(&sub_tx, use_space_queries).await {
+                sub_tx.commit().await?;
+            } else {
+                println!("COULDN'T HANDLE ACTION: {action:?}");
+                sub_tx.rollback().await?;
+            }
+            //});
+
+            if let Some(dep) = SinkActionDependency::match_action(&action) {
+                dependency_nodes.insert(dep, true);
+                // loop through the dependency edges and remove any edges that have this action as a dependent
+                // and push them to the action queue
+                dependency_edges = dependency_edges
+                    .into_iter()
+                    .filter(|(act, _)| act != &action)
+                    .collect();
+            }
+        } else {
+            println!("Dependencies not met for action: {:?}", action);
+            let sub_tx = first_txn.begin().await?;
+            let move_action = action.clone();
+            third_actions.push(async move {
+                move_action
+                    .execute(&sub_tx, use_space_queries)
+                    .await
+                    .unwrap();
+                sub_tx.commit().await
+            });
+        }
+    }
+
+    // while let Some(result) = second_actions.next().await {
+    //     if let Err(err) = result {
+    //         println!("Error handling sink actions: {:?}", err);
+    //         return Err(err.into());
+    //     } else {
+    //         println!("Handled second action nbd brah");
+    //     }
+    // }
+
+    while let Some(result) = third_actions.next().await {
+        if let Err(err) = result {
+            println!("Error handling sink actions: {:?}", err);
+            return Err(err.into());
+        } else {
+            println!("Handled third action nbd brah");
+        }
+    }
+
+    first_txn.commit().await?;
+    if !dependency_edges.is_empty() {
+        let dependency_len = dependency_edges.len();
+        //println!("Initial Actions {initial_len} actions. \n Actions Left: {dependency_len}.\n\n REMAINING ACTIONS: {}", dependency_edges.iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("\n\n"));
+        return Err(format_err!("Dependency edges remaining"));
+    }
 
     Ok(())
 }
 
-async fn try_execute(
-    sink_actions: &Vec<SinkAction>,
-    txn: DatabaseTransaction,
-    use_space_queries: bool,
-    max_connections: usize,
-    max_failures: i32,
-) -> Result<(), Error> {
-    let mut failed_count = 0;
-    while failed_count < max_failures {
-        let result =
-            handle_sink_actions(sink_actions, &txn, use_space_queries, max_connections).await;
+// async fn try_execute(
+//     sink_actions: &Vec<SinkAction<'_>>,
+//     txn: DatabaseTransaction,
+//     use_space_queries: bool,
+//     max_connections: usize,
+//     max_failures: i32,
+// ) -> Result<(), Error> {
+//     let mut failed_count = 0;
+//     while failed_count < max_failures {
+//         let txn = txn.begin().await?;
+//         let result =
+//             handle_sink_actions(sink_actions, &txn, use_space_queries, max_connections).await;
 
-        if let Err(err) = result {
-            println!("Error handling sink actions: {:?}, retrying", err);
-            failed_count += 1;
-            // sleep a random duration between 1 and 5 seconds
-            let sleep_duration = rand::random::<u64>() % 5 + 1;
-            tokio::time::sleep(Duration::from_secs(sleep_duration)).await;
-            continue;
-        } else {
-            break;
-        }
-    }
+//         if let Err(err) = result {
+//             println!("Error handling sink actions: {:?}, retrying", err);
+//             txn.rollback().await?;
+//             failed_count += 1;
+//             // sleep a random duration between 1 and 5 seconds
+//             let sleep_duration = rand::random::<u64>() % 5 + 1;
+//             tokio::time::sleep(Duration::from_secs(sleep_duration)).await;
+//             continue;
+//         } else {
+//             txn.commit().await.unwrap();
+//             break;
+//         }
+//     }
 
-    if failed_count == max_failures {
-        txn.rollback().await.unwrap();
-        Err(format_err!("Too many failures"))
-    } else {
-        txn.commit().await.unwrap();
-        println!("Deafult actions handled");
-        Ok(())
-    }
-}
+//     if failed_count == max_failures {
+//         txn.rollback().await.unwrap();
+//         Err(format_err!("Too many failures"))
+//     } else {
+//         txn.commit().await.unwrap();
+//         println!("Deafult actions handled");
+//         Ok(())
+//     }
+// }
 
 fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {
     // `BlockUndoSignal` must be treated as "delete every data that has been recorded after
@@ -337,23 +490,6 @@ async fn read_http_package(input: &str) -> Result<Package, anyhow::Error> {
     let body = reqwest::get(input).await?.bytes().await?;
 
     Package::decode(body).context("decode command")
-}
-
-fn flatten_actions(actions: Vec<(SinkAction, Option<SinkAction>)>) -> Vec<SinkAction> {
-    let mut actions: Vec<SinkAction> = actions
-        .into_iter()
-        .flat_map(|(action, maybe_action)| {
-            if let Some(maybe_action) = maybe_action {
-                vec![action, maybe_action]
-            } else {
-                vec![action]
-            }
-        })
-        .collect();
-
-    actions.sort_by(|a, b| a.action_priority().cmp(&b.action_priority()));
-
-    actions
 }
 
 #[cfg(test)]
@@ -391,7 +527,7 @@ mod tests {
     async fn test_entry() {
         dotenv().ok();
 
-        let max_connections = 200;
+        let max_connections = 100;
         let database_url = std::env::var("DATABASE_URL").unwrap();
 
         let mut connection_options = ConnectOptions::new(database_url);
@@ -424,27 +560,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_entries() {
-        // this test will:
-        // 1. Start counting up from the start_block
-        // 2. For each block, get the cached_actions from the action_cache/ directory
-        // 3. For those actions, sort them by their index, and then execute them in order
-        // 4. Repeat until we reach the stop_block
-        let blocks_with_data_file = std::fs::read_to_string("./blocks_with_data.json").ok();
-        let mut blocks_with_data = if let Some(file) = &blocks_with_data_file {
-            serde_json::from_str::<HashMap<u64, bool>>(file).unwrap()
-        } else {
-            HashMap::new()
-        };
-
-        let mut block_data_vector = match blocks_with_data_file {
-            Some(_) => Some(blocks_with_data.keys().cloned().collect::<Vec<_>>()),
-            None => None,
-        };
-        if let Some(block_data_vector) = &mut block_data_vector {
-            block_data_vector.sort();
-            block_data_vector.reverse();
-        }
-
         dotenv().ok();
 
         let max_connections = 199;
@@ -452,19 +567,15 @@ mod tests {
 
         let mut connection_options = ConnectOptions::new(database_url);
         connection_options.max_connections(max_connections);
+        connection_options.min_connections(max_connections);
         connection_options.connect_timeout(Duration::from_secs(60));
         connection_options.idle_timeout(Duration::from_secs(60));
 
         let db: Arc<DatabaseConnection> =
             Arc::new(Database::connect(connection_options).await.unwrap());
 
-        let mut start_block = if let Some(block_data_vector) = &mut block_data_vector {
-            block_data_vector.pop().unwrap()
-            //39251292
-        } else {
-            36472425
-            //39251292
-        };
+        let start_block = 36472425;
+        // let start_block = 41110218;
 
         let stop_block: u64 = cursor::get_block_number(&db)
             .await
@@ -472,21 +583,35 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
+
         let entries = std::fs::read_dir("../action_cache").unwrap();
         let entries: Vec<_> = entries.filter_map(Result::ok).collect();
 
-        bootstrap(&db).await.unwrap();
-
-        while start_block < stop_block {
-            if let Some(block_data_vector) = &mut block_data_vector {
-                if !blocks_with_data.get(&start_block).is_some() {
-                    if let Some(block) = block_data_vector.pop() {
-                        start_block = block;
-                        continue;
-                    }
+        // we need to sort the matching files by their index (the number after the prefix)
+        // all of the files are of the form: {block_number}_{index}_{space}_{author}.json
+        let mut block_map: HashMap<u64, bool> = HashMap::new();
+        for entry in entries.iter() {
+            if let Some(filename) = entry.path().file_name() {
+                if let Some(filename_str) = filename.to_str() {
+                    let split_path = filename_str.split("_").collect::<Vec<_>>();
+                    let block_number = split_path[0].parse::<u64>().unwrap();
+                    block_map.insert(block_number, true);
                 }
             }
-            let prefix = format!("{}_", start_block);
+        }
+
+        let mut blocks_with_data = block_map.into_keys().collect::<Vec<_>>();
+        blocks_with_data.sort();
+
+        blocks_with_data = blocks_with_data
+            .into_iter()
+            .filter(|block| block >= &start_block)
+            .collect::<Vec<_>>();
+
+        bootstrap(db.clone()).await.unwrap();
+
+        for block_with_data in blocks_with_data.into_iter() {
+            let prefix = format!("{}_", block_with_data);
             // Filter out the files that start with the desired prefix.
             let mut matching_files: Vec<_> = entries
                 .iter()
@@ -501,14 +626,10 @@ mod tests {
                 .map(|entry| entry.path())
                 .collect();
 
-            if matching_files.len() > 0 {
-                blocks_with_data.insert(start_block, true);
-            }
-
             println!(
-                "Found {} matching files for block {}",
+                "\n\n\n\n\nFound {} matching files for block {}\n\n\n\n\n\n",
                 matching_files.len(),
-                start_block
+                block_with_data
             );
 
             // we need to sort the matching files by their index (the number after the prefix)
@@ -525,7 +646,7 @@ mod tests {
                     .cmp(&b[1].parse::<usize>().unwrap())
             });
 
-            let mut actions: Vec<Action> = matching_files
+            let actions: Vec<Action> = matching_files
                 .into_iter()
                 .map(|path| {
                     let split_path = path.to_str().unwrap().split("_").collect::<Vec<_>>();
@@ -552,17 +673,12 @@ mod tests {
                 .collect();
 
             for action in actions.into_iter() {
+                println!("Processing action");
                 handle_action(action, db.clone(), true, max_connections as usize)
                     .await
                     .unwrap();
+                println!("Done w action");
             }
-            start_block += 1;
         }
-
-        std::fs::write(
-            "./blocks_with_data.json",
-            serde_json::to_string(&blocks_with_data).unwrap(),
-        )
-        .unwrap();
     }
 }

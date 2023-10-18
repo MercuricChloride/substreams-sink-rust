@@ -47,7 +47,7 @@ impl Attributes {
             Attributes::Subspace => "442e1850-9de7-4002-a065-7bc8fcff2514",
             Attributes::Avatar => "235ba0e8-dc7e-4bdd-a1e1-6d0d4497f133",
             Attributes::Cover => "34f53507-2e6b-42c5-a844-43981a77cfa2",
-            Attributes::Image => "ba4e4146-0010-499d-a0a3-caaa7f579d0e",
+            Attributes::Image => "457a27af-7b0b-485c-ac07-aa37756adafa",
             Attributes::IndexedSpace => "30659852-2df5-42f6-9ad7-2921c33ad84b",
             Attributes::ForeignTypes => "be745973-05a9-4cd0-a46d-1c5538270faf",
             Attributes::Blocks => "beaba5cb-a677-41a8-b353-77030613fc70",
