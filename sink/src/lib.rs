@@ -327,7 +327,7 @@ async fn try_action<'a>(
                 for dep in dependencies.iter() {
                     //let is_met = dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
                     //if !is_met {
-                        filtered_dependencies.push(dep);
+                    filtered_dependencies.push(dep);
                     //}
                 }
 
@@ -369,11 +369,12 @@ async fn try_action<'a>(
             let sub_tx = first_txn.begin().await?;
             let move_action = action.clone();
             //second_actions.push(async move {
-                move_action
-                    .execute(&sub_tx, use_space_queries)
-                    .await
-                    .unwrap();
+            if let Ok(_) = move_action.execute(&sub_tx, use_space_queries).await {
                 sub_tx.commit().await?;
+            } else {
+                println!("COULDN'T HANDLE ACTION: {action:?}");
+                sub_tx.rollback().await?;
+            }
             //});
 
             if let Some(dep) = SinkActionDependency::match_action(&action) {
@@ -559,27 +560,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_entries() {
-        // this test will:
-        // 1. Start counting up from the start_block
-        // 2. For each block, get the cached_actions from the action_cache/ directory
-        // 3. For those actions, sort them by their index, and then execute them in order
-        // 4. Repeat until we reach the stop_block
-        let blocks_with_data_file = std::fs::read_to_string("./blocks_with_data.json").ok();
-        let mut blocks_with_data = if let Some(file) = &blocks_with_data_file {
-            serde_json::from_str::<HashMap<u64, bool>>(file).unwrap()
-        } else {
-            HashMap::new()
-        };
-
-        let mut block_data_vector = match blocks_with_data_file {
-            Some(_) => Some(blocks_with_data.keys().cloned().collect::<Vec<_>>()),
-            None => None,
-        };
-        if let Some(block_data_vector) = &mut block_data_vector {
-            block_data_vector.sort();
-            block_data_vector.reverse();
-        }
-
         dotenv().ok();
 
         let max_connections = 199;
@@ -594,14 +574,8 @@ mod tests {
         let db: Arc<DatabaseConnection> =
             Arc::new(Database::connect(connection_options).await.unwrap());
 
-        let mut start_block = if let Some(block_data_vector) = &mut block_data_vector {
-            block_data_vector.pop().unwrap()
-            //39251292
-        } else {
-            36472425
-            //39251292
-        };
-        //let start_block = 39861924;
+        let start_block = 36472425;
+        // let start_block = 41110218;
 
         let stop_block: u64 = cursor::get_block_number(&db)
             .await
@@ -609,8 +583,9 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
+
         let entries = std::fs::read_dir("../action_cache").unwrap();
-        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        let entries: Vec<_> = entries.filter_map(Result::ok).collect();
 
         // we need to sort the matching files by their index (the number after the prefix)
         // all of the files are of the form: {block_number}_{index}_{space}_{author}.json
@@ -633,11 +608,8 @@ mod tests {
             .filter(|block| block >= &start_block)
             .collect::<Vec<_>>();
 
-        //let mut blocks_with_data = std::fs::read_to_string("./blocks_with_data.json").ok();
-
         bootstrap(db.clone()).await.unwrap();
 
-        //while start_block < stop_block {
         for block_with_data in blocks_with_data.into_iter() {
             let prefix = format!("{}_", block_with_data);
             // Filter out the files that start with the desired prefix.
@@ -708,9 +680,5 @@ mod tests {
                 println!("Done w action");
             }
         }
-
-        //std::fs::write(
-        //"./blocks_with_data.json",
-        //serde_json::to_string(&blocks_with_data).unwrap()).unwrap();
     }
 }

@@ -170,7 +170,7 @@ impl ActionDependencies for TableAction<'_> {
                 } else {
                     None
                 }
-//  else {
+                //  else {
                 //     Some(vec![SinkActionDependency::IsType {
                 //         type_id: type_id.to_string(),
                 //     }])
