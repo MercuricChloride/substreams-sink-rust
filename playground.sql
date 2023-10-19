@@ -39,15 +39,15 @@ SELECT e.id, e.name, e.description
 -- START V3 --
 --==========--    
 CREATE TYPE public.type_goal AS (
-  name text,
+  id text  
   description text,	
-  id text
+  name text,
 );
 
 CREATE FUNCTION public.goals() RETURNS SETOF public.type_goal AS $$
 BEGIN
   RETURN QUERY
-  SELECT e.id::text, e.name::text, e.description::text
+  SELECT e.id::text, e.name::text, e.description::text, ROW(s.*)::public.entities
 	FROM entities e
 	JOIN triples t ON e.id = t.entity_id
 	WHERE t.attribute_id = 'type'
@@ -59,3 +59,22 @@ $$ LANGUAGE plpgsql STRICT STABLE;
 --==========--
 -- START V4 --
 --==========--  
+
+
+CREATE TYPE public.type_goal AS (
+  id text,  
+  name text,
+  description text,	
+  subgoals public.entities[] 
+);
+
+CREATE FUNCTION public.goals() RETURNS SETOF public.type_goal AS $$
+BEGIN
+  RETURN QUERY
+  SELECT e.id::text, e.name::text, e.description::text, ROW(e.*)::public.entities
+	FROM entities e
+	JOIN triples t ON e.id = t.entity_id
+	WHERE t.attribute_id = 'type'
+	AND t.value_id = '11ffed68-a58b-42c6-903a-d245e7a46149';
+END;
+$$ LANGUAGE plpgsql STRICT STABLE;
