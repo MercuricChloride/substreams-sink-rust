@@ -1,6 +1,7 @@
 .vscode
 .envrc*
 
+/action_cache
 /data
 /target
 /ipfs-data/
