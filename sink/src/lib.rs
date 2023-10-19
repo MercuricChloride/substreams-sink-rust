@@ -271,12 +271,9 @@ async fn try_action<'a>(
     let mut actions: VecDeque<SinkAction<'a>> = actions.into();
     let mut waiting_queue: VecDeque<SinkAction<'_>> = VecDeque::new();
     // These denote the first tier of actions to handle in the DB(things that have no deps)
-    let mut first_actions: FuturesUnordered<_> = FuturesUnordered::new();
-    // These denote the second tier of actions to handle in the DB(fallback actions)
-    //let mut second_actions: FuturesUnordered<_> = FuturesUnordered::new();
+    let mut first_actions: Vec<_> = Vec::new();
     // These denote the third tier of actions to handle in the DB(actions with deps that should be handled in tier 1 or 2)
-    let mut third_actions: FuturesUnordered<_> = FuturesUnordered::new();
-    //let initial_len = actions.len();
+    let mut third_actions: Vec<_> = Vec::new();
 
     // Contains a map from a Sink Action Dependency to a boolean indicating whether or not the dependency has been met
     let mut dependency_nodes: HashMap<SinkActionDependency, bool> = HashMap::new();
@@ -304,14 +301,9 @@ async fn try_action<'a>(
         }
     }
 
-    while let Some(result) = first_actions.next().await {
-        if let Err(err) = result {
-            println!("Error handling sink actions: {:?}", err);
-            return Err(err.into());
-        } else {
-            println!("Handled first action nbd brah");
-        }
-    }
+    println!("Handling first actions...\n");
+    try_join_all(first_actions).await?;
+    println!("Handled all the first actions");
 
     while let Some(action) = waiting_queue.pop_front() {
         let mut dependencies_met = true;
@@ -400,28 +392,16 @@ async fn try_action<'a>(
         }
     }
 
-    // while let Some(result) = second_actions.next().await {
-    //     if let Err(err) = result {
-    //         println!("Error handling sink actions: {:?}", err);
-    //         return Err(err.into());
-    //     } else {
-    //         println!("Handled second action nbd brah");
-    //     }
-    // }
-
-    while let Some(result) = third_actions.next().await {
-        if let Err(err) = result {
-            println!("Error handling sink actions: {:?}", err);
-            return Err(err.into());
-        } else {
-            println!("Handled third action nbd brah");
-        }
+    println!("Handling third actions...\n");
+    if let Err(err) = try_join_all(third_actions).await {
+        println!("Error handling sink actions: {:?}", err);
+        return Err(err.into());
+    } else {
+        println!("Handled third actions!");
     }
 
     first_txn.commit().await?;
     if !dependency_edges.is_empty() {
-        let dependency_len = dependency_edges.len();
-        //println!("Initial Actions {initial_len} actions. \n Actions Left: {dependency_len}.\n\n REMAINING ACTIONS: {}", dependency_edges.iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>().join("\n\n"));
         return Err(format_err!("Dependency edges remaining"));
     }
 
@@ -497,6 +477,7 @@ mod tests {
     use std::collections::HashMap;
 
     use entity::cursors;
+    use tokio::{sync::mpsc, task};
 
     use crate::triples::ActionTriple;
 
@@ -562,7 +543,7 @@ mod tests {
     async fn test_all_entries() {
         dotenv().ok();
 
-        let max_connections = 199;
+        let max_connections = 499;
         let database_url = std::env::var("DATABASE_URL").unwrap();
 
         let mut connection_options = ConnectOptions::new(database_url);

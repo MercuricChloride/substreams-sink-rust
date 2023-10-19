@@ -22,6 +22,7 @@ pub fn escape(input: &str) -> String {
     input
         .chars()
         .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .filter(|c| c != &'\n')
         .collect::<String>()
 }
 
@@ -31,7 +32,7 @@ pub fn triple_exists_string(entity: &str, attribute: &str, value: &str) -> Strin
 
 pub mod spaces {
     use anyhow::Error;
-    use entity::spaces::*;
+    use entity::{spaces::*, subspaces};
     use migration::{DbErr, OnConflict};
     use sea_orm::{
         ActiveValue, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend,
@@ -100,6 +101,50 @@ pub mod spaces {
     pub async fn exists(db: &DatabaseTransaction, space: &str) -> Result<bool, Error> {
         let space = Entity::find_by_id(space).one(db).await?;
         Ok(space.is_some())
+    }
+
+    pub async fn add_subspace(
+        db: &DatabaseTransaction,
+        parent_space_id: &str,
+        child_space_id: &str,
+    ) -> Result<(), Error> {
+        let id = format!("{parent_space_id}-{child_space_id}");
+
+        let model = subspaces::ActiveModel {
+            id: ActiveValue::Set(id),
+            parent_space: ActiveValue::Set(parent_space_id.to_string()),
+            child_space: ActiveValue::Set(child_space_id.to_string()),
+        };
+
+        subspaces::Entity::insert(model)
+            .on_conflict(
+                OnConflict::column(subspaces::Column::Id)
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .do_nothing()
+            .exec(db)
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn remove_subspace(
+        db: &DatabaseTransaction,
+        parent_space_id: &str,
+        child_space_id: &str,
+    ) -> Result<(), Error> {
+        let id = format!("{parent_space_id}-{child_space_id}");
+
+        let model = subspaces::ActiveModel {
+            id: ActiveValue::Set(id),
+            parent_space: ActiveValue::Set(parent_space_id.to_string()),
+            child_space: ActiveValue::Set(child_space_id.to_string()),
+        };
+
+        subspaces::Entity::delete(model).exec(db).await?;
+
+        Ok(())
     }
 }
 
@@ -236,7 +281,7 @@ pub mod entities {
             let child_entity = child_entity.unwrap();
 
             // grab the entity of the parent
-            let parent_entity = Entity::find_by_id(parent_entity_id.clone()).one(db).await?;
+            let parent_entity = Entity::find_by_id(parent_entity_id).one(db).await?;
             if let None = parent_entity {
                 return Err(Error::msg(format!(
                     "Parent entity {} doesn't exist",
@@ -295,7 +340,7 @@ pub mod entities {
                 txn.commit().await?;
 
                 let column_add_statement = format!(
-                    "ALTER TABLE \"{child_space}\".\"{child_entity}\" ADD COLUMN IF NOT EXISTS \"parent_{parent_entity}\" TEXT REFERENCES \"{parent_space}\".\"{parent_entity}\"(id);",
+                    "ALTER TABLE \"{child_space}\".\"{child_entity}\" ADD COLUMN IF NOT EXISTS \"attr_{parent_entity}\" TEXT REFERENCES \"{parent_space}\".\"{parent_entity}\"(id);",
                     child_space = child_space,
                     child_entity = child_entity_id,
                     parent_space = parent_space,
@@ -313,7 +358,7 @@ pub mod entities {
                 if let Some(parent_entity_name) = parent_entity.name {
                     let txn = db.begin().await?;
                     let column_name_statement = format!(
-                        "COMMENT ON COLUMN \"{child_space}\".\"{child_entity}\".\"parent_{parent_entity}\" IS E'@name {parent_name}';",
+                        "COMMENT ON COLUMN \"{child_space}\".\"{child_entity}\".\"attr_{parent_entity}\" IS E'@name {parent_name}';",
                         child_space = child_space,
                         child_entity = child_entity_id,
                         parent_entity = parent_entity_id,
@@ -345,7 +390,7 @@ pub mod entities {
             let attribute_name = attribute.name.unwrap_or(attribute.id.clone());
             // otherwise we just need to add a column with text
             let column_add_statement = format!(
-                "ALTER TABLE \"{space}\".\"{entity}\" ADD COLUMN IF NOT EXISTS \"parent_{attribute}\" TEXT;",
+                "ALTER TABLE \"{space}\".\"{entity}\" ADD COLUMN IF NOT EXISTS \"attr_{attribute}\" TEXT;",
                 space = space,
                 entity = parent_entity_id,
                 attribute = attribute.id
@@ -357,7 +402,7 @@ pub mod entities {
             ))
             .await?;
             let column_name_statement = format!(
-                "COMMENT ON COLUMN \"{space}\".\"{entity}\".\"parent_{attribute_id}\" IS E'@name {attribute_name}';",
+                "COMMENT ON COLUMN \"{space}\".\"{entity}\".\"attr_{attribute_id}\" IS E'@name {attribute_name}';",
                 space = space,
                 entity = parent_entity_id,
                 attribute_id = attribute_id,
@@ -532,11 +577,11 @@ pub mod entities {
                 }
             }
 
-            // if the entity is an attribute, we need to rename all of the columns that have the name of: "parent_{entity_id}"
+            // if the entity is an attribute, we need to rename all of the columns that have the name of: "attr_{entity_id}"
             let tables_query = format!(
                 "SELECT table_name
                 FROM information_schema.columns
-                WHERE column_name = 'parent_{entity_id}';",
+                WHERE column_name = 'attr_{entity_id}';",
             );
 
             let tables = db
@@ -546,7 +591,7 @@ pub mod entities {
             for table in tables {
                 let table_name: String = table.try_get_by_index(0 as usize).unwrap();
                 let column_name_statement = format!(
-                    "COMMENT ON COLUMN \"{space}\".\"{table_name}\".\"parent_{entity_id}\" IS E'@name {name}';",
+                    "COMMENT ON COLUMN \"{space}\".\"{table_name}\".\"attr_{entity_id}\" IS E'@name {name}';",
                     space = space,
                     table_name = table_name,
                     entity_id = entity_id,
@@ -737,14 +782,16 @@ pub mod accounts {
 
 pub mod triples {
     use anyhow::Error;
-    use entity::triples::*;
+    use entity::{entity_attributes, entity_types, triples::*};
     use migration::{DbErr, OnConflict};
     use sea_orm::{
         ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection,
-        DatabaseTransaction, DbBackend, EntityTrait, QueryFilter, Set, Statement, TransactionTrait,
+        DatabaseTransaction, DbBackend, EntityOrSelect, EntityTrait, QueryFilter, QuerySelect, Set,
+        Statement, TransactionTrait,
     };
-    use sea_query::RcOrArc;
-    use std::sync::Arc;
+    use sea_query::{Condition, Query, RcOrArc};
+    use tokio::{task, time::sleep};
+    use std::{sync::Arc, time::Duration};
     use uuid::Uuid;
 
     use crate::{
@@ -756,6 +803,11 @@ pub mod triples {
 
     use super::triple_exists_string;
 
+    //  To input the data for a triple:
+    //  1. Find all the types the entity has
+    //  2. For each of those types, find the types that have the attribute on them
+    //  3. For all of those types w the attribute, insert the data on the entity_id row
+
     pub async fn create(
         db: &DatabaseTransaction,
         entity_id: &str,
@@ -764,11 +816,6 @@ pub mod triples {
         space: &str,
         author: &str,
     ) -> Result<(), DbErr> {
-        // create the entity and attribute and value if they don't exist
-        //super::entities::create(db, entity_id.clone(), space.clone()).await?;
-
-        //super::entities::create(db, attribute_id.clone(), space.clone()).await?;
-
         let id = format!("{}", Uuid::new_v4());
 
         if let Some(_) = Entity::find_by_id(&id).one(db).await? {
@@ -835,6 +882,47 @@ pub mod triples {
             let mut triple: ActiveModel = triple.into();
             triple.deleted = Set(true);
             triple.save(db).await?;
+        }
+        Ok(())
+    }
+
+    /// This function inserts the triple data into the appropriate table(s)
+    pub async fn insert_triple_data(
+        db: &DatabaseTransaction,
+        entity_id: &str,
+        attribute_id: &str,
+        value: ValueType,
+    ) -> Result<(), DbErr> {
+        let value = value.value();
+
+let bulk_insert = format!("
+DO $$
+DECLARE
+    name text;
+    name_schema text;
+    ATTRIBUTE_ID TEXT := '{attribute_id}';
+    ENTITY_ID_VALUE TEXT := '{entity_id}';
+    ATTR_VALUE TEXT := '{value}';
+BEGIN
+    FOR name, name_schema IN
+        SELECT table_name, table_schema
+        FROM information_schema.columns
+        WHERE column_name = 'entity_id'
+        AND table_name IN (SELECT table_name FROM information_schema.columns WHERE column_name = 'attr_' || ATTRIBUTE_ID)
+    LOOP    
+        EXECUTE format('INSERT INTO %I.%I (id, entity_id, \"attr_%s\") VALUES (%L, %L, %L) ON CONFLICT (id) DO UPDATE SET \"attr_%s\" = EXCLUDED.\"attr_%s\"', name_schema, name, ATTRIBUTE_ID, ENTITY_ID_VALUE, ENTITY_ID_VALUE, ATTR_VALUE, ATTRIBUTE_ID, ATTRIBUTE_ID);
+    END LOOP;
+END $$;
+");
+        let result = db.execute(Statement::from_string(
+            DbBackend::Postgres,
+            bulk_insert,
+        ))
+        .await;
+
+        if let Err(err) = result {
+            println!("\n\n\n\n Error inserting triple data: {:?}\n\n\n\n", err);
+            sleep(Duration::from_millis(1500)).await;
         }
         Ok(())
     }

@@ -40,7 +40,11 @@ pub enum GeneralAction<'a> {
 }
 
 impl GeneralAction<'_> {
-    pub async fn execute(self, db: &DatabaseTransaction) -> Result<(), Error> {
+    pub async fn execute(
+        self,
+        db: &DatabaseTransaction,
+        use_space_queries: bool,
+    ) -> Result<(), Error> {
         match self {
             GeneralAction::TripleAdded {
                 space,
@@ -48,7 +52,12 @@ impl GeneralAction<'_> {
                 attribute_id,
                 value,
                 author,
-            } => triples::create(db, entity_id, attribute_id, value, space, author).await?,
+            } => {
+                if use_space_queries {
+                    // insert triple data
+                }
+                triples::create(db, entity_id, attribute_id, value, space, author).await?
+            }
             GeneralAction::EntityCreated {
                 space,
                 entity_id,

@@ -1,6 +1,4 @@
-use futures03::{
-    future::try_join_all,
-};
+use futures03::future::try_join_all;
 use sea_orm_migration::{
     prelude::*,
     sea_orm::{DatabaseBackend, Statement},
@@ -67,11 +65,7 @@ impl MigrationTrait for Migration {
                             .unique_key()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(Accounts::Avatar)
-                            .text()
-                            .null()
-                    )
+                    .col(ColumnDef::new(Accounts::Avatar).text().null())
                     .to_owned(),
             )
             .await?;
@@ -202,7 +196,12 @@ impl MigrationTrait for Migration {
                     .table(Spaces::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Spaces::Id).text().unique_key().primary_key())
-                    .col(ColumnDef::new(Spaces::Address).text().unique_key().not_null())
+                    .col(
+                        ColumnDef::new(Spaces::Address)
+                            .text()
+                            .unique_key()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(Spaces::CreatedAtBlock).text())
                     .col(ColumnDef::new(Spaces::IsRootSpace).boolean())
                     .col(ColumnDef::new(Spaces::Admins).text())
@@ -226,6 +225,44 @@ impl MigrationTrait for Migration {
                     .name("entity_defined_in_spaces_address_fkey")
                     .from(Entities::Table, Entities::DefinedIn)
                     .to(Spaces::Table, Spaces::Address)
+                    .to_owned(),
+            )
+            .await?;
+
+        // create the subspaces table
+        manager
+            .create_table(
+                Table::create()
+                    .table(Subspaces::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Subspaces::Id)
+                            .text()
+                            .unique_key()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Subspaces::ParentSpace).text().not_null())
+                    .col(ColumnDef::new(Subspaces::ChildSpace).text().not_null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_foreign_key(
+                ForeignKey::create()
+                    .name("subspaces_parent_space_fkey")
+                    .from(Subspaces::Table, Subspaces::ParentSpace)
+                    .to(Spaces::Table, Spaces::Id)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_foreign_key(
+                ForeignKey::create()
+                    .name("subspaces_child_space_fkey")
+                    .from(Subspaces::Table, Subspaces::ChildSpace)
+                    .to(Spaces::Table, Spaces::Id)
                     .to_owned(),
             )
             .await?;
@@ -514,7 +551,8 @@ impl MigrationTrait for Migration {
             ProposedVersions,
             Actions,
             Entities,
-            Versions
+            Versions,
+            Subspaces
         );
 
         Ok(())
@@ -540,7 +578,7 @@ enum Spaces {
     Editors,
     EditorControllers,
     Entity,
-    Cover
+    Cover,
 }
 
 #[derive(DeriveIden)]
@@ -590,6 +628,14 @@ enum EntityTypes {
     Id,
     EntityId,
     Type,
+}
+
+#[derive(DeriveIden)]
+enum Subspaces {
+    Table,
+    Id,
+    ParentSpace,
+    ChildSpace,
 }
 
 #[derive(DeriveIden)]
