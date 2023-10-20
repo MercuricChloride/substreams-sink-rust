@@ -628,7 +628,6 @@ impl ActionTriple {
                     Some(SinkAction::Table(TableAction::ValueTypeAdded {
                         space,
                         entity_id,
-                        attribute_id,
                         value_type: id,
                     }))
                 } else {

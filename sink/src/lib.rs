@@ -38,8 +38,10 @@ use tokio::{
 pub mod actions;
 pub mod commands;
 pub mod constants;
+pub mod macros;
 pub mod models;
 pub mod pb;
+pub mod queries;
 pub mod retry;
 pub mod sink_actions;
 pub mod substreams;

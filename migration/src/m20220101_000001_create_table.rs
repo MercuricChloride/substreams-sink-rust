@@ -441,6 +441,9 @@ impl MigrationTrait for Migration {
         let bootstrap_root_space =
             format!("INSERT INTO \"public\".\"spaces\" (\"id\", \"address\", \"is_root_space\") VALUES ('root_space', '0x170b749413328ac9a94762031a7a05b00c1d2e34', true);");
 
+        let attributes_schema =
+            format!("CREATE SCHEMA IF NOT EXISTS \"attributes\";");
+
         //iterate over each new table and disable triggers
         let tables = manager
             .get_connection()
@@ -481,6 +484,13 @@ impl MigrationTrait for Migration {
             .execute(Statement::from_string(
                 DatabaseBackend::Postgres,
                 bootstrap_root_space_entity,
+            ))
+            .await?;
+
+        connection
+            .execute(Statement::from_string(
+                DatabaseBackend::Postgres,
+                attributes_schema,
             ))
             .await?;
 

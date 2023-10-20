@@ -57,7 +57,6 @@ pub enum TableAction<'a> {
     ValueTypeAdded {
         space: &'a str,
         entity_id: &'a str,
-        attribute_id: &'a str,
         /// The entity id of that particular value type
         value_type: &'a str,
     },
@@ -73,9 +72,11 @@ impl TableAction<'_> {
                 author,
             } => {
                 let space = space.to_lowercase();
+
                 if space_queries {
                     spaces::create_schema(db, &space).await?;
                 }
+
                 spaces::create(
                     db,
                     entity_id.to_string(),
@@ -131,7 +132,6 @@ impl TableAction<'_> {
             TableAction::ValueTypeAdded {
                 space,
                 entity_id,
-                attribute_id,
                 value_type,
             } => {
                 let value_type = match value_type {
@@ -145,9 +145,9 @@ impl TableAction<'_> {
                     entity_id.to_string(),
                     value_type.id().to_string(),
                     space.to_string(),
+                    space_queries,
                 )
                 .await?;
-                // TODO MAYBE WE NEED TO CHANGE ALL COLUMNS THAT MATCH THIS ID???
             }
         };
 
@@ -196,7 +196,6 @@ impl ActionDependencies for TableAction<'_> {
             TableAction::ValueTypeAdded {
                 space,
                 entity_id,
-                attribute_id,
                 value_type,
             } => Some(vec![
                 SinkActionDependency::Exists {
@@ -227,7 +226,6 @@ impl ActionDependencies for TableAction<'_> {
             TableAction::ValueTypeAdded {
                 space,
                 entity_id,
-                attribute_id,
                 value_type,
             } => false,
             TableAction::SpaceCreated {

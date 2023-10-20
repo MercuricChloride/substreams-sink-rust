@@ -318,7 +318,6 @@ impl<'a> SinkAction<'a> {
                 TableAction::ValueTypeAdded {
                     space,
                     entity_id,
-                    attribute_id,
                     value_type,
                 } => 7,
                 TableAction::AttributeAdded {
