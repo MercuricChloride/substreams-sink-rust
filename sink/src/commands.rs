@@ -22,6 +22,8 @@ pub struct Args {
     /// Substreams API token, if not provided, SUBSTREAMS_API_TOKEN environment variable will be used
     #[arg(short, long, env = "SUBSTREAMS_API_TOKEN")]
     pub token: String,
+    #[arg(short, long, env = "ACTION_CACHE")]
+    pub action_cache: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]

@@ -25,8 +25,6 @@ pub mod spaces {
         address: String,
         created_in_space: String,
     ) -> Result<(), DbErr> {
-        // make the entity for the space if it doesn't exist
-        //super::entities::create(db, space_id.clone(), created_in_space).await?;
 
         let space = ActiveModel {
             id: ActiveValue::Set(space_id),
@@ -141,15 +139,9 @@ pub mod entities {
     pub async fn create_table(db: &DatabaseTransaction, entity_id: &str) -> Result<(), Error> {
         let entity = find_entity!(db, entity_id);
 
-        sql_exec!(
-            db,
-            table_create_statement(&entity.defined_in, entity_id)
-        ).await?;
+        sql_exec!(db, table_create_statement(&entity.defined_in, entity_id)).await?;
 
-        sql_exec!(
-            db,
-            table_disable_statement(&entity.defined_in, entity_id)
-        ).await?;
+        sql_exec!(db, table_disable_statement(&entity.defined_in, entity_id)).await?;
 
         // If the entity has a name, we need to add a comment to the table
         if let Some(entity_name) = entity.name {
@@ -170,16 +162,14 @@ pub mod entities {
         attribute_id: &str,
         space: &str,
     ) -> Result<(), Error> {
-        let relation_entity = Entity::find_by_id(attribute_id).one(db).await?;
+        let relation_entity = find_entity!(db, attribute_id);
 
         let mut is_relation = false;
-        if let Some(value_entity) = relation_entity {
-            if let Some(value_type) = value_entity.value_type {
-                if value_type == constants::Entities::Relation.id() {
-                    is_relation = true;
-                }
+        if let Some(value_type) = relation_entity.value_type {
+            if value_type == constants::Entities::Relation.id() {
+                is_relation = true;
             }
-        };
+        }
 
         if is_relation {
             let child_entity_id = attribute_id;

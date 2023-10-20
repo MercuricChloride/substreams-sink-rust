@@ -34,6 +34,7 @@ use tokio::{
     time::Instant,
     try_join,
 };
+use triples::ActionTriple;
 
 pub mod actions;
 pub mod commands;
@@ -60,6 +61,7 @@ pub async fn main() -> Result<(), Error> {
         token,
         database_url,
         max_connections,
+        action_cache,
     } = Args::parse();
 
     let start_block = 36472425;
@@ -120,118 +122,130 @@ pub async fn main() -> Result<(), Error> {
 
             println!("Entry processed in {:?}", start.elapsed());
         }
-        Ok(())
+        Ok::<(), Error>(())
     };
 
-    let stream_task = async {
-        loop {
-            match stream.next().await {
-                None => {
-                    println!("Stream consumed");
-                    break;
+    if let Some(action_cache) = action_cache {
+        let task = async {
+            // if the action cache is defined, we don't want to start a stream and instead read the actions from the cache
+            let path = format!("{action_cache}");
+            let entries = std::fs::read_dir(path.clone())
+                .map_err(|err| format_err!("Error reading action cache directory: {:?} {err:?}", &path))?;
+            let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+
+            println!("Sorting entries");
+            entries.sort_by(|a, b| {
+                let a = a.file_name();
+                let b = b.file_name();
+
+                let a = a.to_str().unwrap();
+                let b = b.to_str().unwrap();
+
+                let a = a.split("_").collect::<Vec<_>>();
+                let b = b.split("_").collect::<Vec<_>>();
+
+                let a_block = a[0].parse::<usize>().unwrap();
+                let b_block = b[0].parse::<usize>().unwrap();
+
+                if a_block == b_block {
+                    a[1].parse::<usize>()
+                        .unwrap()
+                        .cmp(&b[1].parse::<usize>().unwrap())
+                } else {
+                    a_block.cmp(&b_block)
                 }
-                Some(Ok(BlockResponse::New(data))) => {
-                    if let Some(output) = &data.output {
-                        if let Some(map_output) = &output.map_output {
-                            let block_number = data.clock.as_ref().unwrap().number;
-                            println!("Processing block {}", block_number);
-                            let value = EntriesAdded::decode(map_output.value.as_slice()).unwrap();
-                            let tx = tx.clone();
-                            // if the block is empty, store the cursor and set the flag to false
-                            if value.entries.len() == 0 {
-                                cursor::store(&db, data.cursor.clone(), block_number).await?;
-                            } else {
-                                println!(
-                                    "Processing block {}, {} entries to process.",
-                                    block_number,
-                                    value.entries.len()
-                                );
-                                async move {
-                                    let futures: Vec<_> = value
-                                        .entries
-                                        .into_iter()
-                                        .map(|entry| Action::decode_from_entry(entry))
-                                        .collect();
-                                    let actions = try_join_all(futures).await.unwrap();
-                                    for action in actions {
-                                        tx.send(Box::new(action)).await;
+            });
+
+            for entry in entries.into_iter() {
+                let entry_data = std::fs::read(&entry.path()).expect("Couldn't read entry data for {entry:?}");
+                let path_str = entry.path().to_str().unwrap().to_string();
+                let split_path = path_str.split("_").collect::<Vec<_>>();
+
+                let space = split_path[3].to_string();
+                let author = split_path[4].trim_end_matches(".json").to_string();
+
+                let mut action: Action = serde_json::from_slice(&entry_data)?;
+                action.space = space.clone();
+                action.author = author.clone();
+
+                for triple in action.actions.iter_mut() {
+                    update_space_and_author(triple, space.clone(), author.clone());
+                }
+
+                tx.send(Box::new(action)).await?;
+            }
+            Ok::<(), Error>(())
+        };
+
+        #[cfg(not(feature = "no_db_sync"))]
+        let res = try_join!(task, receiver_task);
+
+        match res {
+            Ok(_) => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    } else {
+        let stream_task = async {
+            loop {
+                match stream.next().await {
+                    None => {
+                        println!("Stream consumed");
+                        break;
+                    }
+                    Some(Ok(BlockResponse::New(data))) => {
+                        if let Some(output) = &data.output {
+                            if let Some(map_output) = &output.map_output {
+                                let block_number = data.clock.as_ref().unwrap().number;
+                                println!("Processing block {}", block_number);
+                                let value =
+                                    EntriesAdded::decode(map_output.value.as_slice()).unwrap();
+                                let tx = tx.clone();
+                                // if the block is empty, store the cursor and set the flag to false
+                                if value.entries.len() == 0 {
+                                    cursor::store(&db, data.cursor.clone(), block_number).await?;
+                                } else {
+                                    println!(
+                                        "Processing block {}, {} entries to process.",
+                                        block_number,
+                                        value.entries.len()
+                                    );
+                                    async move {
+                                        let futures: Vec<_> = value
+                                            .entries
+                                            .into_iter()
+                                            .map(|entry| Action::decode_from_entry(entry))
+                                            .collect();
+                                        let actions = try_join_all(futures).await.unwrap();
+                                        for action in actions {
+                                            tx.send(Box::new(action)).await.unwrap();
+                                        }
                                     }
+                                    .await;
                                 }
-                                .await;
                             }
                         }
                     }
-                }
-                Some(Ok(BlockResponse::Undo(undo_signal))) => {
-                    process_block_undo_signal(&undo_signal).unwrap();
-                }
-                Some(Err(err)) => {
-                    println!("Stream terminated with error");
-                    println!("{:?}", err);
-                    return Err(Error::msg(err));
+                    Some(Ok(BlockResponse::Undo(undo_signal))) => {
+                        process_block_undo_signal(&undo_signal).unwrap();
+                    }
+                    Some(Err(err)) => {
+                        println!("Stream terminated with error");
+                        println!("{:?}", err);
+                        return Err(Error::msg(err));
+                    }
                 }
             }
+            Ok(())
+        };
+
+        #[cfg(not(feature = "no_db_sync"))]
+        let res = try_join!(stream_task, receiver_task);
+
+        match res {
+            Ok(_) => Ok(()),
+            Err(err) => Err(err.into()),
         }
-        Ok(())
-    };
-
-    #[cfg(not(feature = "no_db_sync"))]
-    let res = try_join!(stream_task, receiver_task);
-
-    #[cfg(feature = "no_db_sync")]
-    let res = stream_task.await;
-
-    match res {
-        Ok(_) => Ok(()),
-        Err(err) => Err(err.into()),
     }
-}
-
-async fn process_block_scoped_data<'a>(
-    value: EntriesAdded,
-    data: BlockScopedData,
-    db: Arc<DatabaseConnection>,
-    sender: &'a Sender<Box<Action>>,
-) -> Result<(), Error> {
-    // let block_number = data.clock.as_ref().unwrap().number;
-
-    // println!("Getting actions for block {}", block_number);
-
-    // let actions = value
-    //     .entries
-    //     .into_iter()
-    //     .map(|entry| {
-    //         let action = Action::from_entry(entry);
-    //         Box::new(action) as Box<Action<'_>>
-    //     })
-    //     .collect::<Vec<_>>();
-
-    // for (i, (action, author, space)) in actions.into_iter().enumerate() {
-    //     match action {
-    //         Ok(action) => {
-    //             #[cfg(feature = "no_db_sync")]
-    //             {
-    //                 let file_path =
-    //                     format!("./action_cache/{block_number}_{i}_{space}_{author}.json");
-    //                 std::fs::write(&file_path, serde_json::to_string(&action).unwrap()).unwrap();
-    //                 println!("Wrote action to file");
-    //             }
-
-    //             #[cfg(not(feature = "no_db_sync"))]
-    //             sender.send(action).await?
-    //         }
-    //         Err(err) => {
-    //             println!("Error getting action: {:?}", err);
-    //             continue;
-    //         }
-    //     }
-    // }
-
-    // println!("Actions sent");
-
-    // cursor::store(&db, data.cursor, block_number).await?;
-
-    Ok(())
 }
 
 // This function should only use a single connection to the database
@@ -258,8 +272,8 @@ async fn handle_action(
 
     let space = &action.space;
     let author = &action.author;
-
     try_action(sink_actions, db, use_space_queries, author, space).await?;
+
     Ok(())
 }
 
@@ -319,10 +333,7 @@ async fn try_action<'a>(
                 let mut filtered_dependencies = vec![];
 
                 for dep in dependencies.iter() {
-                    //let is_met = dep.met(&mut dependency_nodes, &first_txn).await.unwrap();
-                    //if !is_met {
                     filtered_dependencies.push(dep);
-                    //}
                 }
 
                 let flat_dependencies: Vec<_> = filtered_dependencies
@@ -410,43 +421,6 @@ async fn try_action<'a>(
     Ok(())
 }
 
-// async fn try_execute(
-//     sink_actions: &Vec<SinkAction<'_>>,
-//     txn: DatabaseTransaction,
-//     use_space_queries: bool,
-//     max_connections: usize,
-//     max_failures: i32,
-// ) -> Result<(), Error> {
-//     let mut failed_count = 0;
-//     while failed_count < max_failures {
-//         let txn = txn.begin().await?;
-//         let result =
-//             handle_sink_actions(sink_actions, &txn, use_space_queries, max_connections).await;
-
-//         if let Err(err) = result {
-//             println!("Error handling sink actions: {:?}, retrying", err);
-//             txn.rollback().await?;
-//             failed_count += 1;
-//             // sleep a random duration between 1 and 5 seconds
-//             let sleep_duration = rand::random::<u64>() % 5 + 1;
-//             tokio::time::sleep(Duration::from_secs(sleep_duration)).await;
-//             continue;
-//         } else {
-//             txn.commit().await.unwrap();
-//             break;
-//         }
-//     }
-
-//     if failed_count == max_failures {
-//         txn.rollback().await.unwrap();
-//         Err(format_err!("Too many failures"))
-//     } else {
-//         txn.commit().await.unwrap();
-//         println!("Deafult actions handled");
-//         Ok(())
-//     }
-// }
-
 fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {
     // `BlockUndoSignal` must be treated as "delete every data that has been recorded after
     // block height specified by block in BlockUndoSignal". In the example above, this means
@@ -474,6 +448,24 @@ async fn read_http_package(input: &str) -> Result<Package, anyhow::Error> {
     Package::decode(body).context("decode command")
 }
 
+fn update_space_and_author(triple: &mut ActionTriple, new_space: String, new_author: String) {
+    match triple {
+        ActionTriple::CreateEntity { space, author, .. } => {
+            *space = new_space;
+            *author = new_author;
+        }
+        ActionTriple::CreateTriple { space, author, .. } => {
+            *space = new_space;
+            *author = new_author;
+        }
+
+        ActionTriple::DeleteTriple { space, author, .. } => {
+            *space = new_space;
+            *author = new_author;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -487,24 +479,6 @@ mod tests {
 
     // the cid we are testing for
     const IPFS_CID: &str = "QmZoQVLafegfRqkmM7Px5FuTbEArBhGec3TVRA5b5VQrun";
-
-    fn update_space_and_author(triple: &mut ActionTriple, new_space: String, new_author: String) {
-        match triple {
-            ActionTriple::CreateEntity { space, author, .. } => {
-                *space = new_space;
-                *author = new_author;
-            }
-            ActionTriple::CreateTriple { space, author, .. } => {
-                *space = new_space;
-                *author = new_author;
-            }
-
-            ActionTriple::DeleteTriple { space, author, .. } => {
-                *space = new_space;
-                *author = new_author;
-            }
-        }
-    }
 
     #[tokio::test]
     async fn test_entry() {
@@ -545,7 +519,7 @@ mod tests {
     async fn test_all_entries() {
         dotenv().ok();
 
-        let max_connections = 499;
+        let max_connections = 199;
         let database_url = std::env::var("DATABASE_URL").unwrap();
 
         let mut connection_options = ConnectOptions::new(database_url);
@@ -557,111 +531,55 @@ mod tests {
         let db: Arc<DatabaseConnection> =
             Arc::new(Database::connect(connection_options).await.unwrap());
 
-        let start_block = 36472425;
-        // let start_block = 41110218;
-
-        // let stop_block: u64 = cursor::get_block_number(&db)
-        //     .await
-        //     .unwrap()
-        //     .unwrap()
-        //     .parse()
-        //     .unwrap();
-
         let entries = std::fs::read_dir("../action_cache").unwrap();
-        let entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
 
-        // we need to sort the matching files by their index (the number after the prefix)
-        // all of the files are of the form: {block_number}_{index}_{space}_{author}.json
-        let mut block_map: HashMap<u64, bool> = HashMap::new();
-        for entry in entries.iter() {
-            if let Some(filename) = entry.path().file_name() {
-                if let Some(filename_str) = filename.to_str() {
-                    let split_path = filename_str.split("_").collect::<Vec<_>>();
-                    let block_number = split_path[0].parse::<u64>().unwrap();
-                    block_map.insert(block_number, true);
-                }
-            }
-        }
+        println!("Sorting entries");
+        entries.sort_by(|a, b| {
+            let a = a.file_name();
+            let b = b.file_name();
 
-        let mut blocks_with_data = block_map.into_keys().collect::<Vec<_>>();
-        blocks_with_data.sort();
+            let a = a.to_str().unwrap();
+            let b = b.to_str().unwrap();
 
-        blocks_with_data = blocks_with_data
-            .into_iter()
-            .filter(|block| block >= &start_block)
-            .collect::<Vec<_>>();
+            let a = a.split("_").collect::<Vec<_>>();
+            let b = b.split("_").collect::<Vec<_>>();
 
-        bootstrap(db.clone()).await.unwrap();
+            let a_block = a[0].parse::<usize>().unwrap();
+            let b_block = b[0].parse::<usize>().unwrap();
 
-        for block_with_data in blocks_with_data.into_iter() {
-            let prefix = format!("{}_", block_with_data);
-            // Filter out the files that start with the desired prefix.
-            let mut matching_files: Vec<_> = entries
-                .iter()
-                .filter(|entry| {
-                    if let Some(filename) = entry.path().file_name() {
-                        if let Some(filename_str) = filename.to_str() {
-                            return filename_str.starts_with(&prefix);
-                        }
-                    }
-                    false
-                })
-                .map(|entry| entry.path())
-                .collect();
-
-            println!(
-                "\n\n\n\n\nFound {} matching files for block {}\n\n\n\n\n\n",
-                matching_files.len(),
-                block_with_data
-            );
-
-            // we need to sort the matching files by their index (the number after the prefix)
-            // all of the files are of the form: {block_number}_{index}_{space}_{author}.json
-            matching_files.sort_by(|a, b| {
-                let a = a.file_name().unwrap().to_str().unwrap();
-                let b = b.file_name().unwrap().to_str().unwrap();
-
-                let a = a.split("_").collect::<Vec<_>>();
-                let b = b.split("_").collect::<Vec<_>>();
-
+            if a_block == b_block {
                 a[1].parse::<usize>()
                     .unwrap()
                     .cmp(&b[1].parse::<usize>().unwrap())
-            });
-
-            let actions: Vec<Action> = matching_files
-                .into_iter()
-                .map(|path| {
-                    let split_path = path.to_str().unwrap().split("_").collect::<Vec<_>>();
-                    let space = split_path[3].to_string();
-                    let author = split_path[4].trim_end_matches(".json").to_string();
-
-                    let action = &std::fs::read_to_string(&path).unwrap();
-                    let mut action = serde_json::from_slice::<Action>(action.as_bytes())
-                        .unwrap_or_else(|err| {
-                            panic!(
-                                "Error deserializing action: {:?}, {}",
-                                err,
-                                path.to_str().unwrap()
-                            )
-                        });
-                    action.space = space.clone();
-                    action.author = author.clone();
-
-                    action.actions.iter_mut().for_each(|triple| {
-                        update_space_and_author(triple, space.clone(), author.clone());
-                    });
-                    action
-                })
-                .collect();
-
-            for action in actions.into_iter() {
-                println!("Processing action");
-                handle_action(action, db.clone(), true, max_connections as usize)
-                    .await
-                    .unwrap();
-                println!("Done w action");
+            } else {
+                a_block.cmp(&b_block)
             }
+        });
+
+        bootstrap(db.clone()).await.unwrap();
+
+        for entry in entries.into_iter() {
+            let entry_data = std::fs::read(&entry.path()).unwrap();
+            let path_str = entry.path().to_str().unwrap().to_string();
+            let split_path = path_str.split("_").collect::<Vec<_>>();
+
+            let space = split_path[3].to_string();
+            let author = split_path[4].trim_end_matches(".json").to_string();
+
+            let mut action: Action = serde_json::from_slice(&entry_data).unwrap();
+            action.space = space.clone();
+            action.author = author.clone();
+
+            for triple in action.actions.iter_mut() {
+                update_space_and_author(triple, space.clone(), author.clone());
+            }
+
+            println!("Processing action");
+            handle_action(action, db.clone(), true, max_connections as usize)
+                .await
+                .unwrap();
+            println!("Done w action");
         }
     }
 }
