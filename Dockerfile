@@ -60,4 +60,4 @@ COPY substream.spkg .
 COPY entrypoint.sh .
 
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["--release deploy"]
+CMD ["deploy"]
