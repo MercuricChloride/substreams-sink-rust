@@ -9,6 +9,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY entity/Cargo.toml entity/
 COPY sink/Cargo.toml sink/
 COPY migration/Cargo.toml migration/
+# COPY action_cache action_cache
 
 # Dummy build to cache dependencies
 RUN mkdir -p src entity/src sink/src migration/src && \
@@ -55,6 +56,7 @@ WORKDIR /usr/local/bin
 # Copy the binary from the builder stage to the current stage
 COPY --from=builder /usr/src/geo-substream-sink/target/release/geo-substream-sink .
 COPY --from=builder /usr/local/cargo/bin/sea-orm-cli /usr/local/bin/
+# COPY --from=builder /usr/src/geo-substream-sink/action_cache ./action_cache
 
 COPY substream.spkg . 
 COPY entrypoint.sh .
