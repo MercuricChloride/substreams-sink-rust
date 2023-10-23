@@ -24,6 +24,7 @@ use sea_orm::{
 };
 use sea_orm::{Database, DatabaseConnection};
 use sink_actions::{SinkAction, SinkActionDependency};
+use tokio::sync::mpsc::unbounded_channel;
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
 use std::{sync::Arc, time::Duration};
@@ -96,7 +97,7 @@ pub async fn main() -> Result<(), Error> {
     );
 
     // spawn a concurrent process to handle the substream data
-    let (tx, mut rx) = channel::<Box<Action>>(10000);
+    let (tx, mut rx) = unbounded_channel::<Box<Action>>();
 
     #[cfg(not(feature = "no_db_sync"))]
     let receiver_task = async {
@@ -106,6 +107,8 @@ pub async fn main() -> Result<(), Error> {
                 (vec![root_space_address], false)
             }
         };
+
+        let (action_sender, mut action_receiver) = unbounded_channel::<Pin<Box<dyn Future<Output = Result<(), Error>>>>>();
 
         let mut start;
         while let Some(action) = rx.recv().await {
@@ -120,11 +123,20 @@ pub async fn main() -> Result<(), Error> {
                 max_connections as usize,
             ).await?;
 
-            let ActionFutures{ actions_and_author  } = result;
+            let ActionFutures{ actions_and_author, sink_actions } = result;
 
             actions_and_author.await?;
 
+            action_sender.send(sink_actions).unwrap();
+
             println!("Entry processed in {:?}", start.elapsed());
+        }
+        drop(action_sender);
+
+        while let Some(action_future) = action_receiver.recv().await {
+            println!("Processing action");
+            action_future.await?;
+            println!("Action processed");
         }
         Ok::<(), Error>(())
     };
@@ -176,8 +188,12 @@ pub async fn main() -> Result<(), Error> {
                     update_space_and_author(triple, space.clone(), author.clone());
                 }
 
-                tx.send(Box::new(action)).await?;
+                tx.send(Box::new(action))?;
             }
+
+            println!("Done processing action cache");
+            drop(tx);
+
             Ok::<(), Error>(())
         };
 
@@ -221,7 +237,7 @@ pub async fn main() -> Result<(), Error> {
                                             .collect();
                                         let actions = join_all(futures).await.into_iter().filter_map(|action| action.ok()).collect::<Vec<_>>();
                                         for action in actions {
-                                            tx.send(Box::new(action)).await.unwrap();
+                                            tx.send(Box::new(action)).unwrap();
                                         }
                                     }
                                     .await;
@@ -257,7 +273,7 @@ pub async fn main() -> Result<(), Error> {
 
 pub struct ActionFutures {
     pub actions_and_author: Pin<Box<dyn Future<Output = Result<(), Error>>>>,
-    //pub sink_actions: Pin<Box<dyn Future<Output = Result<(), Error>>>>,
+    pub sink_actions: Pin<Box<dyn Future<Output = Result<(), Error>>>>,
 }
 
 async fn handle_action(
@@ -266,43 +282,45 @@ async fn handle_action(
     use_space_queries: bool,
     max_connections: usize,
 ) -> Result<ActionFutures, Error> {
-    // let sink_actions = if use_space_queries {
-    //     action.get_sink_actions()
-    // } else {
-    //     action.get_global_sink_actions()
-    // };
+    let sink_actions = if use_space_queries {
+        action.get_sink_actions()
+    } else {
+        action.get_global_sink_actions()
+    };
 
+    let db_clone = db.clone();
+    let action_clone = action.clone();
     let actions_and_author = Box::pin(async move {
-        let txn = db.clone().begin().await?;
 
-        action
+        let txn = db_clone.begin().await?;
+
+        action_clone
             .execute_action_triples(&txn, use_space_queries, max_connections)
             .await?;
 
-        action.add_author_to_db(&txn).await?;
+        action_clone.add_author_to_db(&txn).await?;
 
         txn.commit().await?;
         Ok::<(), Error>(())
     });
 
-    Ok(ActionFutures { actions_and_author })
+    let space = action.space.clone();
+    let author = action.author.clone();
 
-    // let space = &action.space;
-    // let author = &action.author;
-    // try_action(sink_actions, db, use_space_queries, author, space).await?;
+    let sink_actions = Box::pin(try_action(sink_actions.to_vec(), db, use_space_queries, author, space));
 
-    //Ok(())
+    Ok(ActionFutures { actions_and_author, sink_actions })
 }
 
-async fn try_action<'a>(
-    actions: Vec<SinkAction<'a>>,
+async fn try_action(
+    actions: Vec<SinkAction>,
     db: Arc<DatabaseConnection>,
     use_space_queries: bool,
-    author: &str,
-    space: &str,
+    author: String,
+    space: String,
 ) -> Result<(), Error> {
-    let mut actions: VecDeque<SinkAction<'a>> = actions.into();
-    let mut waiting_queue: VecDeque<SinkAction<'_>> = VecDeque::new();
+    let mut actions: VecDeque<SinkAction> = actions.into();
+    let mut waiting_queue: VecDeque<SinkAction> = VecDeque::new();
     // These denote the first tier of actions to handle in the DB(things that have no deps)
     let mut first_actions: Vec<_> = Vec::new();
     // These denote the third tier of actions to handle in the DB(actions with deps that should be handled in tier 1 or 2)
@@ -311,7 +329,7 @@ async fn try_action<'a>(
     // Contains a map from a Sink Action Dependency to a boolean indicating whether or not the dependency has been met
     let mut dependency_nodes: HashMap<SinkActionDependency, bool> = HashMap::new();
     // Contains tuples of (Action, DependentAction)
-    let mut dependency_edges: Vec<(SinkAction<'_>, SinkActionDependency)> = Vec::new();
+    let mut dependency_edges: Vec<(SinkAction, SinkActionDependency)> = Vec::new();
 
     let first_txn = db
         .begin_with_config(Some(IsolationLevel::ReadCommitted), None)
@@ -356,7 +374,7 @@ async fn try_action<'a>(
                 let flat_dependencies: Vec<_> = filtered_dependencies
                     .iter()
                     .flat_map(|dep| {
-                        dep.fallback_actions(author.into(), space.into())
+                        dep.fallback_actions(&author, &space)
                             .unwrap_or(vec![])
                     })
                     .collect();

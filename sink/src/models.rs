@@ -879,7 +879,7 @@ END $$;
         };
         let sink_actions = action.get_sink_actions();
 
-        try_action(sink_actions, db, true, author, ROOT_SPACE_ADDRESS).await?;
+        try_action(sink_actions, db, true, author.into(), ROOT_SPACE_ADDRESS.into()).await?;
         println!("Finished boostrap");
 
         Ok(())

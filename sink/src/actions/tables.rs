@@ -10,16 +10,16 @@ use crate::{
 
 use super::general::GeneralAction;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
-pub enum TableAction<'a> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TableAction {
     /// This action denotes a newly created space. The string is the address of the space.
     /// We care about this in the sink because when a new space is created, we need to deploy
     /// a new subgraph for that space.
     SpaceCreated {
-        entity_id: &'a str,
-        space: &'a str,
-        created_in_space: &'a str,
-        author: &'a str,
+        entity_id: String,
+        space: String,
+        created_in_space: String,
+        author: String,
     },
 
     /// This action denotes a type being added to an entity in the DB
@@ -30,11 +30,11 @@ pub enum TableAction<'a> {
     /// Note that a TypeAdded action may also create a new type if the type_id is the "Type" entity in the root space.
     TypeAdded {
         /// The address of the space that this type was created in.
-        space: &'a str,
+        space: String,
         /// The ID of the entity that this type was added to.
-        entity_id: &'a str,
+        entity_id: String,
         /// The ID of the type entity
-        type_id: &'a str,
+        type_id: String,
     },
 
     /// We also care about an attribute being added to an entity, we need the entity ID and the space it was made in
@@ -46,23 +46,23 @@ pub enum TableAction<'a> {
     /// `(Goal, "attributes", Subgoal)`
     AttributeAdded {
         /// The address of the space that this attribute was created in.
-        space: &'a str,
+        space: String,
         /// The ID of the entity that this attribute was added to.
-        entity_id: &'a str,
+        entity_id: String,
         /// The ID of the attribute entity
-        attribute_id: &'a str,
+        attribute_id: String,
     },
 
     /// We care about a ValueType being added to an entity because we need this when adding attributes to a type in the graph.
     ValueTypeAdded {
-        space: &'a str,
-        entity_id: &'a str,
+        space: String,
+        entity_id: String,
         /// The entity id of that particular value type
-        value_type: &'a str,
+        value_type: String,
     },
 }
 
-impl TableAction<'_> {
+impl TableAction {
     pub async fn execute(self, db: &DatabaseTransaction, space_queries: bool) -> Result<(), Error> {
         match self {
             TableAction::SpaceCreated {
@@ -96,7 +96,7 @@ impl TableAction<'_> {
 
                 // if we are giving an entity a type of "Type", we also need to create a table for it
                 if type_id == constants::Entities::SchemaType.id() {
-                    entities::upsert_is_type(db, entity_id, true, space).await?;
+                    entities::upsert_is_type(db, &entity_id, true, &space).await?;
 
                     if space_queries {
                         entities::create_table(db, &entity_id).await?;
@@ -155,7 +155,7 @@ impl TableAction<'_> {
     }
 }
 
-impl ActionDependencies for TableAction<'_> {
+impl ActionDependencies for TableAction {
     fn dependencies(&self) -> Option<Vec<SinkActionDependency>> {
         match self {
             TableAction::TypeAdded {

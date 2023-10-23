@@ -108,7 +108,7 @@ impl Action {
     }
 
     /// This function returns a vector of all the sink actions that should be handled in this action.
-    pub fn get_sink_actions<'a>(&'a self) -> Vec<SinkAction<'a>> {
+    pub fn get_sink_actions(&self) -> Vec<SinkAction> {
         let mut sink_actions = Vec::new();
         for action in self.actions.iter() {
             if action.is_missing_data() {
@@ -125,7 +125,7 @@ impl Action {
     }
 
     /// This function returns a vector of all the sink_actions that should be handled when running the global light api
-    pub fn get_global_sink_actions<'a>(&'a self) -> Vec<SinkAction<'a>> {
+    pub fn get_global_sink_actions(& self) -> Vec<SinkAction> {
         let mut sink_actions = Vec::new();
         for action in self.actions.iter() {
             let (default_action, sink_action) = action.get_global_sink_actions();
@@ -391,7 +391,7 @@ impl ActionTriple {
     }
 
     /// This method returns a vector of all the sink actions that should be handled in this action triple.
-    pub fn get_sink_actions<'a>(&'a self) -> (SinkAction<'a>, Option<SinkAction<'a>>) {
+    pub fn get_sink_actions(&self) -> (SinkAction, Option<SinkAction>) {
         let default_action = self.get_default_action();
 
         let sink_action = self.try_from().ok();
@@ -400,7 +400,7 @@ impl ActionTriple {
     }
 
     /// This method returns a vector of all the sink actions that should be handled in this action triple, when running the global light api.
-    pub fn get_global_sink_actions<'a>(&'a self) -> (SinkAction<'a>, Option<SinkAction<'a>>) {
+    pub fn get_global_sink_actions(&self) -> (SinkAction, Option<SinkAction>) {
         let default_action = self.get_default_action();
 
         let sink_action: Option<SinkAction> = self.try_from().ok();
@@ -420,9 +420,9 @@ impl ActionTriple {
                 space,
                 author,
             } => SinkAction::General(GeneralAction::EntityCreated {
-                space,
-                entity_id,
-                author,
+                space: space.into(),
+                entity_id: entity_id.into(),
+                author: author.into(),
             }),
             ActionTriple::CreateTriple {
                 entity_id,
@@ -431,11 +431,11 @@ impl ActionTriple {
                 space,
                 author,
             } => SinkAction::General(GeneralAction::TripleAdded {
-                space,
-                entity_id,
-                attribute_id,
+                space: space.into(),
+                entity_id: entity_id.into(),
+                attribute_id: attribute_id.into(),
                 value: value.clone(),
-                author,
+                author: author.into(),
             }),
             ActionTriple::DeleteTriple {
                 entity_id,
@@ -444,11 +444,11 @@ impl ActionTriple {
                 space,
                 author,
             } => SinkAction::General(GeneralAction::TripleDeleted {
-                space,
-                entity_id,
-                attribute_id,
+                space: space.into(),
+                entity_id: entity_id.into(),
+                attribute_id: attribute_id.into(),
                 value: value.clone(),
-                author,
+                author: author.into(),
             }),
         }
     }
@@ -463,9 +463,9 @@ impl ActionTriple {
                 ..
             } if attribute_id.starts_with(Attributes::Type.id()) => {
                 Some(SinkAction::Table(TableAction::TypeAdded {
-                    space,
-                    entity_id,
-                    type_id: value.id(),
+                    space: space.into(),
+                    entity_id: entity_id.into(),
+                    type_id: value.id().into(),
                 }))
             }
             _ => None,
@@ -484,10 +484,10 @@ impl ActionTriple {
                 // if the attribute id is space, and the value is a string, then we have created a space.
                 if let ValueType::String { id: _, value } = value {
                     Some(SinkAction::Table(TableAction::SpaceCreated {
-                        space: value,
-                        created_in_space: space,
-                        entity_id,
-                        author,
+                        space: value.into(),
+                        created_in_space: space.into(),
+                        entity_id: entity_id.into(),
+                        author: author.into(),
                     }))
                 } else {
                     None
@@ -509,9 +509,9 @@ impl ActionTriple {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::Entity { id } = value {
                     return Some(SinkAction::Table(TableAction::AttributeAdded {
-                        space,
-                        entity_id,
-                        attribute_id: id,
+                        space: space.into(),
+                        entity_id: entity_id.into(),
+                        attribute_id: id.into(),
                     }));
                 } else {
                     None
@@ -533,9 +533,9 @@ impl ActionTriple {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::String { value, .. } = value {
                     return Some(SinkAction::Entity(EntityAction::NameAdded {
-                        name: value,
-                        space,
-                        entity_id,
+                        name: value.into(),
+                        space: space.into(),
+                        entity_id: entity_id.into(),
                     }));
                 } else {
                     None
@@ -557,9 +557,9 @@ impl ActionTriple {
                 // if the attribute id is attribute, then we have added an attribute to an entity.
                 if let ValueType::String { value, .. } = value {
                     return Some(SinkAction::Entity(EntityAction::DescriptionAdded {
-                        description: value,
-                        space,
-                        entity_id,
+                        description: value.into(),
+                        space: space.into(),
+                        entity_id: entity_id.into(),
                     }));
                 } else {
                     None
@@ -580,9 +580,9 @@ impl ActionTriple {
             } if attribute_id.starts_with(Attributes::Cover.id()) => {
                 if let ValueType::String { value, .. } = value {
                     return Some(SinkAction::Space(SpaceAction::CoverAdded {
-                        space,
-                        entity_id,
-                        cover_image: value,
+                        space: space.into(),
+                        entity_id: entity_id.into(),
+                        cover_image: value.into(),
                     }));
                 } else {
                     None
@@ -603,9 +603,9 @@ impl ActionTriple {
             } if attribute_id.starts_with(Attributes::Avatar.id()) => {
                 if let ValueType::String { value, .. } = value {
                     return Some(SinkAction::Entity(EntityAction::AvatarAdded {
-                        space,
-                        entity_id,
-                        avatar_image: value,
+                        space: space.into(),
+                        entity_id: entity_id.into(),
+                        avatar_image: value.into(),
                     }));
                 } else {
                     None
@@ -626,9 +626,9 @@ impl ActionTriple {
             } if attribute_id.starts_with(Attributes::ValueType.id()) => {
                 if let ValueType::Entity { id } = value {
                     Some(SinkAction::Table(TableAction::ValueTypeAdded {
-                        space,
-                        entity_id,
-                        value_type: id,
+                        space: space.into(),
+                        entity_id: entity_id.into(),
+                        value_type: id.into(),
                     }))
                 } else {
                     None
@@ -652,8 +652,8 @@ impl ActionTriple {
                 };
 
                 Some(SinkAction::Space(SpaceAction::SubspaceAdded {
-                    parent_space: entity_id,
-                    child_space: child_space_id,
+                    parent_space: entity_id.into(),
+                    child_space: child_space_id.into(),
                 }))
             }
             _ => None,
@@ -674,8 +674,8 @@ impl ActionTriple {
                 };
 
                 Some(SinkAction::Space(SpaceAction::SubspaceRemoved {
-                    parent_space: entity_id,
-                    child_space: child_space_id,
+                    parent_space: entity_id.into(),
+                    child_space: child_space_id.into(),
                 }))
             }
             _ => None,

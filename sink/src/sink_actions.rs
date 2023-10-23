@@ -39,11 +39,11 @@ use tokio_stream::StreamExt;
 /// The reason for this is just so we can keep track of what actions we have taken in the database.
 /// In addition to specific actions that should do special things, which are the rest of the variants.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-pub enum SinkAction<'a> {
-    Table(TableAction<'a>),
-    Space(SpaceAction<'a>),
-    Entity(EntityAction<'a>),
-    General(GeneralAction<'a>),
+pub enum SinkAction {
+    Table(TableAction),
+    Space(SpaceAction),
+    Entity(EntityAction),
+    General(GeneralAction),
 }
 
 /// This enum represents the different dependencies that a sink action can have.
@@ -75,48 +75,48 @@ impl<'a> SinkActionDependency {
         &'b self,
         author: &'b str,
         space: &'b str,
-    ) -> Option<Vec<SinkAction<'_>>> {
+    ) -> Option<Vec<SinkAction>> {
         match self {
             SinkActionDependency::IsType { type_id } => {
                 // if the type is not a type, we need to add the type
                 Some(vec![
                     SinkAction::Table(TableAction::TypeAdded {
-                        space,
-                        entity_id: type_id,
-                        type_id: Entities::SchemaType.id(),
+                        space: space.into(),
+                        entity_id: type_id.into(),
+                        type_id: Entities::SchemaType.id().into(),
                     }),
                     SinkAction::General(GeneralAction::TripleAdded {
-                        space,
-                        entity_id: type_id,
-                        attribute_id: Attributes::Type.id(),
+                        space: space.into(),
+                        entity_id: type_id.into(),
+                        attribute_id: Attributes::Type.id().into(),
                         value: ValueType::Entity {
                             id: Entities::SchemaType.id().to_string(),
                         },
-                        author,
+                        author: author.into(),
                     }),
                 ])
             }
             SinkActionDependency::IsAttribute { entity_id } => Some(vec![
                 SinkAction::Table(TableAction::TypeAdded {
-                    space,
-                    entity_id,
-                    type_id: Entities::Attribute.id(),
+                    space: space.into(),
+                    entity_id: entity_id.into(),
+                    type_id: Entities::Attribute.id().into(),
                 }),
                 SinkAction::General(GeneralAction::TripleAdded {
-                    space,
-                    entity_id,
-                    attribute_id: Attributes::Type.id(),
+                    space: space.into(),
+                    entity_id: entity_id.into(),
+                    attribute_id: Attributes::Type.id().into(),
                     value: ValueType::Entity {
                         id: Entities::Attribute.id().into(),
                     },
-                    author,
+                    author: author.into(),
                 }),
             ]),
             SinkActionDependency::Exists { entity_id } => {
                 Some(vec![SinkAction::General(GeneralAction::EntityCreated {
-                    space,
-                    entity_id,
-                    author,
+                    space: space.into(),
+                    entity_id: entity_id.into(),
+                    author: author.into(),
                 })])
             }
             SinkActionDependency::ValueTypeMatches { .. }
@@ -178,7 +178,7 @@ impl<'a> SinkActionDependency {
     }
 
     /// This function checks if a sink_action is solving one of these dependencies
-    pub fn match_action(action: &SinkAction<'a>) -> Option<SinkActionDependency> {
+    pub fn match_action(action: &SinkAction) -> Option<SinkActionDependency> {
         match action {
             SinkAction::Table(action) => {
                 if let TableAction::TypeAdded {
@@ -224,7 +224,7 @@ pub trait ActionDependencies {
     fn has_fallback(&self) -> bool;
 }
 
-impl ActionDependencies for SinkAction<'_> {
+impl ActionDependencies for SinkAction {
     fn dependencies(&self) -> Option<Vec<SinkActionDependency>> {
         match self {
             SinkAction::Table(table) => table.dependencies(),
@@ -273,7 +273,7 @@ impl ActionDependencies for SinkAction<'_> {
 //     Ok(())
 // }
 
-impl<'a> SinkAction<'a> {
+impl SinkAction {
     pub async fn execute(self, db: &DatabaseTransaction, space_queries: bool) -> Result<(), Error> {
         match self {
             SinkAction::Table(action) => action.execute(db, space_queries).await,
