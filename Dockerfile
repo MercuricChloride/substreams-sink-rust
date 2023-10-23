@@ -60,4 +60,4 @@ COPY substream.spkg .
 COPY entrypoint.sh .
 
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["deploy-global"]
+CMD ["deploy"]
