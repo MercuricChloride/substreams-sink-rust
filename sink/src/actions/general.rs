@@ -12,34 +12,34 @@ use crate::{
 use super::tables::TableAction;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum GeneralAction<'a> {
+pub enum GeneralAction {
     /// If we don't have any specific task to take, we will just add the triple to the graph
     TripleAdded {
-        space: &'a str,
-        entity_id: &'a str,
-        attribute_id: &'a str,
+        space: String,
+        entity_id: String,
+        attribute_id: String,
         value: ValueType,
-        author: &'a str,
+        author: String,
     },
 
     /// If it's an entity creation action, we need to add the entity to the graph
     EntityCreated {
-        space: &'a str,
-        entity_id: &'a str,
-        author: &'a str,
+        space: String,
+        entity_id: String,
+        author: String,
     },
 
     /// If it's a triple deletion action, we need to remove the entity from the graph
     TripleDeleted {
-        space: &'a str,
-        entity_id: &'a str,
-        attribute_id: &'a str,
+        space: String,
+        entity_id: String,
+        attribute_id: String,
         value: ValueType,
-        author: &'a str,
+        author: String,
     },
 }
 
-impl GeneralAction<'_> {
+impl GeneralAction {
     pub async fn execute(
         self,
         db: &DatabaseTransaction,
@@ -56,20 +56,20 @@ impl GeneralAction<'_> {
                 if use_space_queries {
                     // insert triple data
                 }
-                triples::create(db, entity_id, attribute_id, value, space, author).await?
+                triples::create(db, &entity_id, &attribute_id, value, &space, &author).await?
             }
             GeneralAction::EntityCreated {
                 space,
                 entity_id,
                 author,
-            } => entities::create(db, entity_id, space).await?,
+            } => entities::create(db, &entity_id, &space).await?,
             GeneralAction::TripleDeleted {
                 space,
                 entity_id,
                 attribute_id,
                 value,
                 author,
-            } => triples::delete(db, entity_id, attribute_id, value, space, author).await?,
+            } => triples::delete(db, &entity_id, &attribute_id, value, &space, &author).await?,
         };
         Ok(())
     }
@@ -86,7 +86,7 @@ impl GeneralAction<'_> {
     }
 }
 
-impl ActionDependencies for GeneralAction<'_> {
+impl ActionDependencies for GeneralAction {
     fn dependencies(&self) -> Option<Vec<Dep>> {
         match self {
             GeneralAction::TripleAdded {

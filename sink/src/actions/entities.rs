@@ -8,31 +8,31 @@ use crate::{
 
 use super::general::GeneralAction;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
-pub enum EntityAction<'a> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EntityAction {
     /// Avatars can be added to users
     AvatarAdded {
-        space: &'a str,
-        entity_id: &'a str,
-        avatar_image: &'a str,
+        space: String,
+        entity_id: String,
+        avatar_image: String,
     },
 
     /// We care about a name being added to an entity because we need this when adding attributes to a type in the graph.
     NameAdded {
-        space: &'a str,
-        entity_id: &'a str,
-        name: &'a str,
+        space: String,
+        entity_id: String,
+        name: String,
     },
 
     /// We care about a description being added to an entity
     DescriptionAdded {
-        space: &'a str,
-        entity_id: &'a str,
-        description: &'a str,
+        space: String,
+        entity_id: String,
+        description: String,
     },
 }
 
-impl EntityAction<'_> {
+impl EntityAction {
     pub async fn execute(
         &self,
         db: &DatabaseTransaction,
@@ -62,7 +62,7 @@ impl EntityAction<'_> {
     }
 }
 
-impl ActionDependencies for EntityAction<'_> {
+impl ActionDependencies for EntityAction {
     fn dependencies(&self) -> Option<Vec<Dep>> {
         match self {
             EntityAction::AvatarAdded {

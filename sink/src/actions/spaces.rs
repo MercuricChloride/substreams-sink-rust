@@ -8,28 +8,28 @@ use crate::{
 
 use super::tables::TableAction;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
-pub enum SpaceAction<'a> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SpaceAction {
     /// Covers can be added to spaces, this is the cover image for the webpage
     CoverAdded {
-        space: &'a str,
-        entity_id: &'a str,
-        cover_image: &'a str,
+        space: String,
+        entity_id: String,
+        cover_image: String,
     },
     /// Spaces can have subspaces, and we need to know when a subspace is added to a space so we can deploy a new subgraph for that space.
     SubspaceAdded {
-        parent_space: &'a str,
-        child_space: &'a str,
+        parent_space: String,
+        child_space: String,
     },
 
     /// Spaces can also remove subspaces, and we need to know when a subspace is removed from a space
     SubspaceRemoved {
-        parent_space: &'a str,
-        child_space: &'a str,
+        parent_space: String,
+        child_space: String,
     },
 }
 
-impl SpaceAction<'_> {
+impl SpaceAction {
     pub async fn execute(&self, db: &DatabaseTransaction) -> Result<(), Error> {
         match self {
             SpaceAction::CoverAdded {
@@ -51,7 +51,7 @@ impl SpaceAction<'_> {
     }
 }
 
-impl ActionDependencies for SpaceAction<'_> {
+impl ActionDependencies for SpaceAction {
     fn dependencies(&self) -> Option<Vec<Dep>> {
         match self {
             SpaceAction::CoverAdded {
