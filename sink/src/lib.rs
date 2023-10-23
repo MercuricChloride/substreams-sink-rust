@@ -25,6 +25,7 @@ use sea_orm::{
 use sea_orm::{Database, DatabaseConnection};
 use sink_actions::{SinkAction, SinkActionDependency};
 use std::collections::{HashMap, VecDeque};
+use std::pin::Pin;
 use std::{sync::Arc, time::Duration};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
@@ -112,13 +113,16 @@ pub async fn main() -> Result<(), Error> {
             start = Instant::now();
             println!("Processing entry");
 
-            handle_action(
+            let result = handle_action(
                 *action,
                 db.clone(),
                 use_space_queries,
                 max_connections as usize,
-            )
-            .await?;
+            ).await?;
+
+            let ActionFutures{ actions_and_author  } = result;
+
+            actions_and_author.await?;
 
             println!("Entry processed in {:?}", start.elapsed());
         }
@@ -215,7 +219,7 @@ pub async fn main() -> Result<(), Error> {
                                             .into_iter()
                                             .map(|entry| Action::decode_from_entry(entry))
                                             .collect();
-                                        let actions = try_join_all(futures).await.unwrap();
+                                        let actions = join_all(futures).await.into_iter().filter_map(|action| action.ok()).collect::<Vec<_>>();
                                         for action in actions {
                                             tx.send(Box::new(action)).await.unwrap();
                                         }
@@ -250,31 +254,44 @@ pub async fn main() -> Result<(), Error> {
 
 // This function should only use a single connection to the database
 // We might want to make this function more concurrent, but we will see.
+
+pub struct ActionFutures {
+    pub actions_and_author: Pin<Box<dyn Future<Output = Result<(), Error>>>>,
+    //pub sink_actions: Pin<Box<dyn Future<Output = Result<(), Error>>>>,
+}
+
 async fn handle_action(
     action: Action,
     db: Arc<DatabaseConnection>,
     use_space_queries: bool,
     max_connections: usize,
-) -> Result<(), Error> {
-    let sink_actions = if use_space_queries {
-        action.get_sink_actions()
-    } else {
-        action.get_global_sink_actions()
-    };
+) -> Result<ActionFutures, Error> {
+    // let sink_actions = if use_space_queries {
+    //     action.get_sink_actions()
+    // } else {
+    //     action.get_global_sink_actions()
+    // };
 
-    let txn = db.begin().await?;
+    let actions_and_author = Box::pin(async move {
+        let txn = db.clone().begin().await?;
 
-    action
-        .execute_action_triples(&txn, use_space_queries, max_connections)
-        .await?;
-    action.add_author_to_db(&txn).await?;
-    txn.commit().await?;
+        action
+            .execute_action_triples(&txn, use_space_queries, max_connections)
+            .await?;
 
-    let space = &action.space;
-    let author = &action.author;
-    try_action(sink_actions, db, use_space_queries, author, space).await?;
+        action.add_author_to_db(&txn).await?;
 
-    Ok(())
+        txn.commit().await?;
+        Ok::<(), Error>(())
+    });
+
+    Ok(ActionFutures { actions_and_author })
+
+    // let space = &action.space;
+    // let author = &action.author;
+    // try_action(sink_actions, db, use_space_queries, author, space).await?;
+
+    //Ok(())
 }
 
 async fn try_action<'a>(
