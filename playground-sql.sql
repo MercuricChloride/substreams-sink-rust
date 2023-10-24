@@ -143,7 +143,7 @@ CREATE INDEX idx_entity_attribute ON public.triples(entity_id, attribute_id);
 --==========--  
 
 -- Returns all the types from the entities table 
-CREATE OR REPLACE FUNCTION all_types()
+CREATE OR REPLACE FUNCTION all_schema_types()
 RETURNS SETOF entities AS $$
 BEGIN
   RETURN QUERY
@@ -156,7 +156,30 @@ BEGIN
         );
 END;
 $$ LANGUAGE plpgsql STRICT STABLE;
-comment on function all_types() is E'@filterable';
+comment on function all_schema_types() is E'@filterable';
+
+-- Returns all the types from the entities table 
+CREATE OR REPLACE FUNCTION all_schema_type_entities(entity_name text DEFAULT NULL)
+RETURNS SETOF entities AS $$
+BEGIN
+  RETURN QUERY
+  SELECT e.*
+        FROM entities e
+        WHERE e.id IN (
+            SELECT t.entity_id
+            FROM triples t
+            WHERE t.attribute_id = 'type'
+            AND (entity_name IS NULL OR t.valu ILIKE entity_name);
+        )
+        
+END;
+$$ LANGUAGE plpgsql STRICT STABLE;
+COMMENT ON FUNCTION all_schema_type_entities(text) IS E'@filterable';
+
+
+
+
+
 
 -- Returns the type of an entity
 CREATE OR REPLACE FUNCTION entities_type(e_row entities)

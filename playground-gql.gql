@@ -34,3 +34,26 @@ query claims {
     }
   }
 }
+
+# DEMO
+{
+	allClaims {
+    nodes {
+      name
+      type {
+        nodes {
+          name
+          id
+        }
+      }
+     
+      schema {
+        nodes {
+          id
+          name
+          valueType
+        }
+		}
+    }
+  }
+}
