@@ -158,8 +158,8 @@ END;
 $$ LANGUAGE plpgsql STRICT STABLE;
 comment on function all_schema_types() is E'@filterable';
 
--- Returns all the types from the entities table 
-CREATE OR REPLACE FUNCTION all_schema_type_entities(entity_name text DEFAULT NULL)
+-- Returns all the types from the entities table - NOTE THAT "STRICT" MUST BE REMOVED FOR DEFAULT NULL TO WORK
+CREATE OR REPLACE FUNCTION all_schema_type_entities(type_id text default null)
 RETURNS SETOF entities AS $$
 BEGIN
   RETURN QUERY
@@ -169,20 +169,17 @@ BEGIN
             SELECT t.entity_id
             FROM triples t
             WHERE t.attribute_id = 'type'
-            AND (entity_name IS NULL OR t.valu ILIKE entity_name);
-        )
-        
+            AND (type_id IS NULL OR t.value_id = type_id)
+        );
 END;
-$$ LANGUAGE plpgsql STRICT STABLE;
+$$ LANGUAGE plpgsql STABLE;
 COMMENT ON FUNCTION all_schema_type_entities(text) IS E'@filterable';
 
 
 
 
-
-
--- Returns the type of an entity
-CREATE OR REPLACE FUNCTION entities_type(e_row entities)
+-- Computed Column "entities.types". Returns types of entities. 
+CREATE OR REPLACE FUNCTION entities_types(e_row entities)
 RETURNS SETOF entities AS $$
 BEGIN
     RETURN QUERY
@@ -196,7 +193,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STRICT STABLE;
 
--- Returns all the entity attributes for an entity scoped to the entities type
+-- Computed Column "entities.schema". Returns the schemas for each of the types associated with the entity
 CREATE OR REPLACE FUNCTION entities_schema(e_row entities)
 RETURNS SETOF entities AS $$
 BEGIN
@@ -220,7 +217,7 @@ END;
 $$ LANGUAGE plpgsql STRICT STABLE;
 
 
--- allClaims, filterable and sortable
+-- Custom query. Returns all entities with a type of "Claim"
 CREATE OR REPLACE FUNCTION "entities-fa8e8e54-f742-4c00-b73c-05adee2b4545"() 
 RETURNS SETOF entities AS $$
 BEGIN
@@ -238,7 +235,7 @@ comment on function "entities-fa8e8e54-f742-4c00-b73c-05adee2b4545"() is E'@name
 @sortable
 @filterable';
 
--- adds opposingArguments attribute to entity types
+-- Computed column "entity_types.opposing_arguments". 
 CREATE OR REPLACE FUNCTION "entity_types_0c0a2a95-1928-4ec4-876d-cc04075b7927"(et entity_types) RETURNS SETOF public.triples AS $$
 BEGIN
   RETURN QUERY
