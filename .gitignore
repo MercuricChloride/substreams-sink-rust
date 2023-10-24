@@ -7,5 +7,3 @@
 /ipfs-data/
 /.env
 /replay.log
-playground-sql.sql
-playground-gql.gql

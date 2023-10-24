@@ -1,0 +1,36 @@
+query AllEntityTypes {
+  allEntityTypes {
+    nodes {
+      type
+      entityId
+      entityByEntityId {
+        name
+        description
+      }
+      entityByType {
+        name
+        description
+      }
+    }
+  }
+}
+
+comment on view market_view is 
+E'@primaryKey id\n
+@foreignKey (event_id) references event_view|@fieldName markets|@foreignFieldName something';
+
+# Query Claims With Attributes
+query claims {
+  allEntityTypes(first: 100) {
+    nodes {
+      entityId
+      type
+      attributes {
+        nodes {
+          entityId
+          attributeOf
+        }
+      }
+    }
+  }
+}
