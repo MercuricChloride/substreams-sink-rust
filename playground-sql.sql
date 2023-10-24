@@ -120,7 +120,7 @@ BEGIN
  END;
 END;
 $$ LANGUAGE plpgsql STRICT STABLE;
-comment on function "allType-fa8e8e54-f742-4c00-b73c-05adee2b4545"() is E'@name allClaims
+comment on function "entities-fa8e8e54-f742-4c00-b73c-05adee2b4545"() is E'@name allClaims
 @sortable
 @filterable';
 
@@ -138,38 +138,62 @@ comment on function "entity_types_0c0a2a95-1928-4ec4-876d-cc04075b7927"(et entit
 
 CREATE INDEX idx_entity_attribute ON public.triples(entity_id, attribute_id);
 
-
-
 --==========--
 -- START V5 --
 --==========--  
 
 -- Returns all the types from the entities table 
-CREATE OR REPLACE FUNCTION allTypes()
+CREATE OR REPLACE FUNCTION all_types()
 RETURNS SETOF entities AS $$
 BEGIN
   RETURN QUERY
   SELECT e.*
-  FROM entities e
-  WHERE e.is_type = true;
+        FROM entities e
+        WHERE e.id IN (
+            SELECT t.entity_id
+            FROM triples t
+            WHERE t.attribute_id = 'type' AND t.value_id = 'd7ab4092-0ab5-441e-88c3-5c27952de773'
+        );
 END;
 $$ LANGUAGE plpgsql STRICT STABLE;
-comment on function allTypes() is E'@filterable';
+comment on function all_types() is E'@filterable';
 
--- Returns all the entity attributes for an entity
-CREATE OR REPLACE FUNCTION entities_attributes(e_row entities)
+-- Returns the type of an entity
+CREATE OR REPLACE FUNCTION entities_type(e_row entities)
 RETURNS SETOF entities AS $$
 BEGIN
-  RETURN QUERY
-  
-  SELECT e.*
-	FROM entities e
-	WHERE e.id IN (
-	    SELECT t.value_id
-	    FROM triples t
-	    WHERE t.entity_id = e_row.id and t.attribute_id = '01412f83-8189-4ab1-8365-65c7fd358cc1'
-	);
- END;
+    RETURN QUERY
+    SELECT e.*
+    FROM entities e
+    WHERE e.id IN (
+        SELECT t.value_id
+        FROM triples t
+        WHERE t.entity_id = e_row.id AND t.attribute_id = 'type'
+    );
+END;
+$$ LANGUAGE plpgsql STRICT STABLE;
+
+-- Returns all the entity attributes for an entity scoped to the entities type
+CREATE OR REPLACE FUNCTION entities_schema(e_row entities)
+RETURNS SETOF entities AS $$
+BEGIN
+    -- Using CTE to first fetch all types of the given entity
+    RETURN QUERY 
+    WITH entity_types AS (
+        SELECT t.value_id AS type_id
+        FROM triples t
+        WHERE t.entity_id = e_row.id AND t.attribute_id = 'type'
+    ),
+    type_attributes AS (
+        -- For each type, fetch the associated attributes
+        SELECT DISTINCT t.value_id AS attribute_id
+        FROM entity_types et
+        JOIN triples t ON t.entity_id = et.type_id AND t.attribute_id = '01412f83-8189-4ab1-8365-65c7fd358cc1'
+    )
+    SELECT e.*
+    FROM entities e
+    JOIN type_attributes ta ON e.id = ta.attribute_id;
+END;
 $$ LANGUAGE plpgsql STRICT STABLE;
 
 
@@ -183,10 +207,13 @@ BEGIN
   WHERE e.id IN (
       SELECT t.entity_id
       FROM triples t
-      WHERE  t.attribute_id = 'type' AND t.value_id = 'd7ab4092-0ab5-441e-88c3-5c27952de773'
+      WHERE  t.attribute_id = 'type' AND t.value_id = 'fa8e8e54-f742-4c00-b73c-05adee2b4545'
   );
 END;
 $$ LANGUAGE plpgsql STRICT STABLE;
+comment on function "entities-fa8e8e54-f742-4c00-b73c-05adee2b4545"() is E'@name allClaims
+@sortable
+@filterable';
 
 -- adds opposingArguments attribute to entity types
 CREATE OR REPLACE FUNCTION "entity_types_0c0a2a95-1928-4ec4-876d-cc04075b7927"(et entity_types) RETURNS SETOF public.triples AS $$
@@ -201,4 +228,4 @@ $$ LANGUAGE plpgsql STRICT STABLE;
 comment on function "entity_types_0c0a2a95-1928-4ec4-876d-cc04075b7927"(et entity_types) is E'@fieldName opposingArguments';
 
 CREATE INDEX idx_entity_attribute ON public.triples(entity_id, attribute_id);
-
+CREATE INDEX idx_entity_attribute_value_id ON public.triples(entity_id, attribute_id, value_id);
