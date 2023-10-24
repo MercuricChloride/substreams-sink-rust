@@ -175,9 +175,6 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 COMMENT ON FUNCTION all_schema_type_entities(text) IS E'@filterable';
 
-
-
-
 -- Computed Column "entities.types". Returns types of entities. 
 CREATE OR REPLACE FUNCTION entities_types(e_row entities)
 RETURNS SETOF entities AS $$
