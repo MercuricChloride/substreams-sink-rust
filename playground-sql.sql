@@ -246,3 +246,31 @@ comment on function "entity_types_0c0a2a95-1928-4ec4-876d-cc04075b7927"(et entit
 
 CREATE INDEX idx_entity_attribute ON public.triples(entity_id, attribute_id);
 CREATE INDEX idx_entity_attribute_value_id ON public.triples(entity_id, attribute_id, value_id);
+
+--==========--
+-- START V6 --
+--==========--  
+CREATE type primitive_value {
+  value {
+    id: text;
+    type: "image" | "date" | "string";
+    value: text;
+  }
+}
+
+CREATE type entity_value {
+  value {
+    id: text;
+    type: "entity";
+    value: entities;
+  }
+}
+
+CREATE type drugs {
+  name: text;
+  entity_id: text;
+  cover: entity_value[];
+  diseases: entity_value[];
+  brand_names: entity_value[];
+  manufacturers: entity_value[]
+}
