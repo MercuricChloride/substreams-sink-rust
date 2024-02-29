@@ -6,6 +6,7 @@ use pb::sf::substreams::v1::Package;
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
 use prost_types::{Any, FileDescriptorProto, FileDescriptorSet};
+use std::sync::mpsc;
 use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
@@ -25,12 +26,79 @@ pub struct StreamConfig {
     pub stop: u64,
 }
 
+pub async fn start_stream_channel(
+    config: StreamConfig,
+) -> Result<mpsc::Receiver<String>, anyhow::Error> {
+    let (tx, rx) = mpsc::channel();
+
+    let StreamConfig {
+        endpoint_url,
+        package_file,
+        module_name,
+        token,
+        stop,
+        start,
+        ..
+    } = config;
+
+    let package = read_package(&package_file).await?;
+    let endpoint = Arc::new(SubstreamsEndpoint::new(&endpoint_url, token).await?);
+    let file_descriptor_set = FileDescriptorSet {
+        file: package.proto_files.clone(),
+    };
+
+    let descriptor_pool = DescriptorPool::from_file_descriptor_set(file_descriptor_set)
+        .expect("Failed to convert file descriptor set to descriptor pool");
+
+    let cursor: Option<String> = load_persisted_cursor()?;
+
+    let mut stream = SubstreamsStream::new(
+        endpoint.clone(),
+        cursor,
+        package.modules.clone(),
+        module_name.to_string(),
+        start,
+        stop,
+    );
+
+    tokio::task::spawn(async move {
+        loop {
+            match stream.next().await {
+                None => {
+                    println!("Stream consumed");
+                    break;
+                }
+                Some(Ok(BlockResponse::New(data))) => {
+                    let result = process_block_scoped_data(&data, &descriptor_pool).unwrap();
+                    persist_cursor(data.cursor).unwrap();
+                    tx.send(result).unwrap();
+                }
+                Some(Ok(BlockResponse::Undo(undo_signal))) => {
+                    //process_block_undo_signal(&undo_signal).unwrap();
+                    //persist_cursor(undo_signal.last_valid_cursor).unwrap();
+                    //tx.send(undo_signal.last_valid_cursor).unwrap();
+                }
+                Some(Err(err)) => {
+                    println!();
+                    println!("Stream terminated with error");
+                    println!("{:?}", err);
+                    exit(1);
+                }
+            }
+        }
+    });
+
+    Ok(rx)
+}
+
 pub async fn start_stream(config: StreamConfig) -> Result<(), Error> {
     let StreamConfig {
         endpoint_url,
         package_file,
         module_name,
         token,
+        stop,
+        start,
         ..
     } = config;
 
@@ -51,8 +119,8 @@ pub async fn start_stream(config: StreamConfig) -> Result<(), Error> {
         cursor,
         package.modules.clone(),
         module_name.to_string(),
-        block_range.0,
-        block_range.1,
+        start,
+        stop,
     );
 
     loop {
@@ -81,31 +149,21 @@ pub async fn start_stream(config: StreamConfig) -> Result<(), Error> {
     Ok(())
 }
 
-fn process_block_scoped_data(data: &BlockScopedData, pool: &DescriptorPool) -> Result<(), Error> {
+fn process_block_scoped_data(
+    data: &BlockScopedData,
+    pool: &DescriptorPool,
+) -> Result<String, Error> {
     let output = data.output.as_ref().unwrap().map_output.as_ref().unwrap();
-
-    //println!("Descriptors: {:?}", file_descriptor_set);
 
     let message_type = &output.type_url.trim_start_matches("type.googleapis.com/");
     let descriptor = pool.get_message_by_name(message_type).expect(&format!(
         "Failed to get message descriptor for type: {} from pool",
         message_type
     ));
-
     let dynamic_value = DynamicMessage::decode(descriptor, output.value.as_slice()).unwrap();
 
     let as_json = serde_json::to_string_pretty(&dynamic_value).unwrap();
-
-    println!("Dynamic Value: {}", as_json);
-
-    println!(
-        "Block #{} - Payload\n {}\n ({} bytes)",
-        data.clock.as_ref().unwrap().number,
-        message_type,
-        output.value.len()
-    );
-
-    Ok(())
+    Ok(as_json)
 }
 
 fn process_block_undo_signal(_undo_signal: &BlockUndoSignal) -> Result<(), anyhow::Error> {

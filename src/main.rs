@@ -10,7 +10,7 @@ use substreams_stream::{BlockResponse, SubstreamsStream};
 
 use dotenv::dotenv;
 
-use substreams_sink_rust_lib::{start_stream, StreamConfig};
+use substreams_sink_rust_lib::{start_stream, start_stream_channel, StreamConfig};
 
 mod pb;
 mod substreams;
@@ -30,8 +30,16 @@ async fn main() -> Result<(), Error> {
         module_name: "graph_out".to_string(),
         token: Some(api_key),
         start: 12369621,
-        stop: 12369721,
+        stop: 12369631,
     };
 
-    start_stream(config).await
+    let rx = start_stream_channel(config).await?;
+
+    while let Ok(data) = rx.recv() {
+        println!("data: \n{}\n", data);
+    }
+
+    // start_stream(config).await
+
+    Ok(())
 }
