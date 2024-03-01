@@ -11,9 +11,11 @@ use std::{env, process::exit, sync::Arc};
 use substreams::SubstreamsEndpoint;
 use substreams_stream::{BlockResponse, SubstreamsStream};
 
+pub use pb::*;
+
 use prost_wkt_types::*;
 
-mod pb;
+pub mod pb;
 mod substreams;
 mod substreams_stream;
 
