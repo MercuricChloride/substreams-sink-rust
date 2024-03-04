@@ -1,7 +1,7 @@
 use anyhow::{format_err, Context, Error};
 use futures03::StreamExt;
 use pb::sf::substreams::rpc::v2::{BlockScopedData, BlockUndoSignal};
-use pb::sf::substreams::v1::Package;
+pub use pb::sf::substreams::v1::Package;
 
 use prost::Message;
 use prost_reflect::{DescriptorPool, DynamicMessage};
